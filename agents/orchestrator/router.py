@@ -11,6 +11,23 @@ workflow 側の edges を {route: node} 形式の分岐に切り替える。
 from __future__ import annotations
 
 
+def classify(text: str) -> dict[str, str]:
+    """タスク文から種別・規模を判定する（副作用なし）。
+
+    server.py（可視化）と route_task の両方から使う共通ロジック。
+    """
+    text = (text or "").strip()
+    lowered = text.lower()
+    if any(k in lowered for k in ("api", "crud", "fastapi", "エンドポイント")):
+        task_type = "api"
+    elif any(k in lowered for k in ("lp", "ランディング", "html", "サイト")):
+        task_type = "lp"
+    else:
+        task_type = "api"  # M1の既定はAPIパイプライン
+    scale = "heavy" if len(text) > 200 else "light"
+    return {"task_type": task_type, "scale": scale}
+
+
 def route_task(node_input: str) -> str:
     """ユーザーのタスク文を受け取り、種別・規模を判定して本文を後続へ渡す。
 
@@ -21,18 +38,9 @@ def route_task(node_input: str) -> str:
         後続（designer）に渡すタスク文。M1ではそのまま透過。
     """
     text = (node_input or "").strip()
-
-    # --- タスク種別の簡易判定（M1はAPI固定。判定ロジックの置き場所を確定させる）---
-    lowered = text.lower()
-    if any(k in lowered for k in ("api", "crud", "fastapi", "エンドポイント")):
-        task_type = "api"
-    elif any(k in lowered for k in ("lp", "ランディング", "html", "サイト")):
-        task_type = "lp"
-    else:
-        task_type = "api"  # M1の既定はAPIパイプライン
-
-    # --- 規模判定（要件 F-02: light/heavy で動員数・モデルを変える土台）---
-    scale = "heavy" if len(text) > 200 else "light"
-
-    print(f"[router] task_type={task_type} scale={scale} len={len(text)}")
+    decision = classify(text)
+    print(
+        f"[router] task_type={decision['task_type']} "
+        f"scale={decision['scale']} len={len(text)}"
+    )
     return text

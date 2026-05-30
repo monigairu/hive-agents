@@ -3,7 +3,7 @@
 SHELL := /bin/bash
 ENV := set -a && source .env && set +a
 
-.PHONY: help smoke run-local serve-agents stop-agents status run-a2a
+.PHONY: help smoke run-local serve-agents stop-agents status run-a2a serve-orchestrator ui
 
 help: ## このヘルプを表示
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -25,3 +25,9 @@ status: ## M2: 各Agentサーバの稼働確認
 
 run-a2a: ## M2: A2A越しでグラフE2E（先に `make serve-agents` が必要）
 	$(ENV) && HIVE_A2A=1 uv run python scripts/m1_run.py
+
+serve-orchestrator: ## M3: OrchestratorのSSEサーバを起動（:8000・フロントが購読）
+	$(ENV) && uv run uvicorn agents.orchestrator.server:app --host localhost --port 8000
+
+ui: ## M3: チャットUI(Next.js)を起動（:3000・別ターミナルで serve-orchestrator も必要）
+	cd frontend && npm run dev
