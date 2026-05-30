@@ -8,18 +8,18 @@ from __future__ import annotations
 
 from google.adk import Agent
 
-from agents.orchestrator.schemas import DesignSpec, ImplementationResult
+from agents.orchestrator.schemas import ImplementationResult
 from shared.models import FLASH
 
 implementer_agent = Agent(
     name="implementer",
     model=FLASH,
     description="設計仕様から動作するFastAPIコードを生成する実装担当",
-    input_schema=DesignSpec,
     output_schema=ImplementationResult,
     instruction=(
-        "あなたは実装エンジニアです。受け取った設計仕様(DesignSpec)に基づき、"
-        "FastAPI のコードを生成してください。\n"
+        "あなたは実装エンジニアです。前段(designer)が出力した設計仕様のJSON"
+        "（overview / endpoints / file_structure / notes を持つ）をテキストで受け取ります。"
+        "その設計に基づき FastAPI のコードを生成してください。\n"
         "- code: 単一ファイル(main.py)で完結する、そのまま動くFastAPIコード。"
         "外部DBは使わずインメモリ(dict等)で永続化し、追加依存は fastapi と uvicorn のみ。\n"
         "- file_structure: 生成物のファイル構成（M1は ['main.py'] 想定）\n"
