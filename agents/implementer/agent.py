@@ -1,0 +1,29 @@
+"""implementer Agent（要件 F-03）：設計仕様から FastAPI コードを生成する。
+
+入力：DesignSpec
+出力：ImplementationResult（code・file_structure・how_to_verify）
+"""
+
+from __future__ import annotations
+
+from google.adk import Agent
+
+from agents.orchestrator.schemas import DesignSpec, ImplementationResult
+from shared.models import FLASH
+
+implementer_agent = Agent(
+    name="implementer",
+    model=FLASH,
+    description="設計仕様から動作するFastAPIコードを生成する実装担当",
+    input_schema=DesignSpec,
+    output_schema=ImplementationResult,
+    instruction=(
+        "あなたは実装エンジニアです。受け取った設計仕様(DesignSpec)に基づき、"
+        "FastAPI のコードを生成してください。\n"
+        "- code: 単一ファイル(main.py)で完結する、そのまま動くFastAPIコード。"
+        "外部DBは使わずインメモリ(dict等)で永続化し、追加依存は fastapi と uvicorn のみ。\n"
+        "- file_structure: 生成物のファイル構成（M1は ['main.py'] 想定）\n"
+        "- how_to_verify: 起動コマンドと、CRUDを確認できる具体的な curl 例を必ず含める\n"
+        "設計のendpointsを全て実装すること。コードはMarkdownのコードフェンスで囲まず、生のPythonだけを code に入れること。"
+    ),
+)

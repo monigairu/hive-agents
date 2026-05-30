@@ -1,0 +1,16 @@
+[project]
+name = "hive"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "google-adk>=2.1,<3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# ローカル開発用に agents / shared を hive パッケージとして編集可能インストールする。
+# （M2で各Agentを独立サービス化する際は、各Agentに専用 pyproject を持たせる）
+packages = ["agents", "shared"]
