@@ -1,0 +1,238 @@
+"use client";
+
+import { useRef, useState } from "react";
+
+// Orchestrator(SSE) のエンドポイント。デプロイ時は NEXT_PUBLIC_HIVE_API で差し替え。
+const API = process.env.NEXT_PUBLIC_HIVE_API ?? "http://localhost:8000";
+
+// 役割をドラクエ職業に対応（要件 F-14 の伏線：M7でドット絵キャラに昇格）
+const JOB: Record<string, { emoji: string; job: string; ring: string }> = {
+  designer: { emoji: "🧙", job: "まほうつかい", ring: "ring-violet-400" },
+  implementer: { emoji: "⚔️", job: "せんし", ring: "ring-amber-400" },
+  tester: { emoji: "⛪", job: "そうりょ", ring: "ring-sky-400" },
+};
+
+type TimelineItem =
+  | { id: number; kind: "task"; task: string }
+  | { id: number; kind: "router"; taskType: string; scale: string }
+  | { id: number; kind: "thinking"; agent: string; role: string }
+  | { id: number; kind: "output"; agent: string; role: string; text: string }
+  | { id: number; kind: "done" }
+  | { id: number; kind: "error"; message: string };
+
+let _id = 0;
+const nextId = () => ++_id;
+
+/** agent_output の JSON を画面表示用に要約する。 */
+function summarize(agent: string, text: string) {
+  try {
+    const o = JSON.parse(text);
+    if (agent === "designer")
+      return { title: o.overview as string, list: (o.endpoints as string[]) ?? [] };
+    if (agent === "implementer")
+      return { title: "実装が完成した", verify: o.how_to_verify as string, code: o.code as string };
+    if (agent === "tester")
+      return { title: o.summary as string, code: o.test_code as string };
+  } catch {
+    /* JSONでなければ生テキスト表示 */
+  }
+  return { title: "", raw: text };
+}
+
+export default function Home() {
+  const [task, setTask] = useState("タスク管理のCRUD APIをFastAPIで作って");
+  const [items, setItems] = useState<TimelineItem[]>([]);
+  const [running, setRunning] = useState(false);
+  const esRef = useRef<EventSource | null>(null);
+
+  const push = (item: TimelineItem) => setItems((prev) => [...prev, item]);
+
+  function start() {
+    if (running || !task.trim()) return;
+    esRef.current?.close();
+    setItems([]);
+    setRunning(true);
+
+    const es = new EventSource(`${API}/stream?task=${encodeURIComponent(task)}`);
+    esRef.current = es;
+
+    // カスタムイベントは Event 型で渡るため MessageEvent にキャストして data を読む
+    const on = (name: string, fn: (data: Record<string, string>) => void) =>
+      es.addEventListener(name, (e) => {
+        const raw = (e as MessageEvent).data;
+        fn(raw ? JSON.parse(raw) : {});
+      });
+
+    on("task_received", (d) => push({ id: nextId(), kind: "task", task: d.task }));
+    on("router", (d) =>
+      push({ id: nextId(), kind: "router", taskType: d.task_type, scale: d.scale }),
+    );
+    on("agent_start", (d) =>
+      push({ id: nextId(), kind: "thinking", agent: d.agent, role: d.role }),
+    );
+    on("agent_output", (d) => {
+      // 直前の「かんがえている…」を消して成果に置き換える
+      setItems((prev) => {
+        const filtered = prev.filter(
+          (it) => !(it.kind === "thinking" && it.agent === d.agent),
+        );
+        return [
+          ...filtered,
+          { id: nextId(), kind: "output", agent: d.agent, role: d.role, text: d.text },
+        ];
+      });
+    });
+    on("done", () => {
+      push({ id: nextId(), kind: "done" });
+      setRunning(false);
+      es.close(); // SSEの自動再接続を止める（重要）
+    });
+    es.addEventListener("error", (e) => {
+      // アプリ起因のエラーイベント（dataあり）と接続断（dataなし）の両方を処理
+      const msg =
+        e instanceof MessageEvent && e.data ? JSON.parse(e.data).message : "接続が切れました";
+      push({ id: nextId(), kind: "error", message: msg });
+      setRunning(false);
+      es.close();
+    });
+  }
+
+  return (
+    <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-6 px-4 py-8">
+      <header className="flex items-center gap-3">
+        <span className="text-3xl">🐝</span>
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Hive</h1>
+          <p className="text-sm text-neutral-500">
+            自然言語で発注すると、はたらきバチたちが設計→実装→テストを分担する
+          </p>
+        </div>
+      </header>
+
+      <div className="flex gap-2">
+        <input
+          className="flex-1 rounded-lg border border-neutral-300 px-3 py-2 text-sm outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-200 dark:border-neutral-700 dark:bg-neutral-900"
+          value={task}
+          onChange={(e) => setTask(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && start()}
+          placeholder="例: 在庫管理のCRUD APIを作って"
+          disabled={running}
+        />
+        <button
+          onClick={start}
+          disabled={running}
+          className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-600 disabled:opacity-50"
+        >
+          {running ? "進行中…" : "発注する"}
+        </button>
+      </div>
+
+      <ol className="flex flex-col gap-3">
+        {items.map((it) => (
+          <li key={it.id}>{renderItem(it)}</li>
+        ))}
+      </ol>
+    </main>
+  );
+}
+
+function Avatar({ agent, role }: { agent: string; role: string }) {
+  const j = JOB[agent] ?? { emoji: "🐝", job: role, ring: "ring-neutral-300" };
+  return (
+    <div className="flex w-16 shrink-0 flex-col items-center">
+      <div
+        className={`flex h-12 w-12 items-center justify-center rounded-full bg-neutral-100 text-2xl ring-2 ${j.ring} dark:bg-neutral-800`}
+      >
+        {j.emoji}
+      </div>
+      <span className="mt-1 text-[10px] text-neutral-500">{j.job}</span>
+    </div>
+  );
+}
+
+function Card({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex gap-3 rounded-xl border border-neutral-200 bg-white p-3 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
+      {children}
+    </div>
+  );
+}
+
+function renderItem(it: TimelineItem) {
+  switch (it.kind) {
+    case "task":
+      return (
+        <div className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+          📜 発注：{it.task}
+        </div>
+      );
+    case "router":
+      return (
+        <div className="text-center text-xs text-neutral-500">
+          ⚙️ ルーター判定：種別 <b>{it.taskType}</b> / 規模 <b>{it.scale}</b> → はたらきバチを編成
+        </div>
+      );
+    case "thinking":
+      return (
+        <Card>
+          <Avatar agent={it.agent} role={it.role} />
+          <div className="flex items-center text-sm text-neutral-500">
+            <span className="font-medium text-neutral-700 dark:text-neutral-300">
+              {it.agent}
+            </span>
+            は かんがえている
+            <span className="ml-1 inline-flex animate-pulse">…</span>
+          </div>
+        </Card>
+      );
+    case "output": {
+      const s = summarize(it.agent, it.text);
+      return (
+        <Card>
+          <Avatar agent={it.agent} role={it.role} />
+          <div className="min-w-0 flex-1 text-sm">
+            <div className="font-semibold">{it.agent}</div>
+            {s.title && <p className="mt-0.5 text-neutral-700 dark:text-neutral-300">{s.title}</p>}
+            {"list" in s && s.list && (
+              <ul className="mt-1 list-disc pl-5 text-neutral-600 dark:text-neutral-400">
+                {s.list.map((x, i) => (
+                  <li key={i}>{x}</li>
+                ))}
+              </ul>
+            )}
+            {"verify" in s && s.verify && (
+              <p className="mt-1 whitespace-pre-wrap text-xs text-neutral-500">
+                ✅ 確認方法：{s.verify}
+              </p>
+            )}
+            {"code" in s && s.code && (
+              <details className="mt-2">
+                <summary className="cursor-pointer text-xs text-amber-700">コードを見る</summary>
+                <pre className="mt-1 max-h-72 overflow-auto rounded-lg bg-neutral-950 p-3 text-[11px] leading-relaxed text-neutral-100">
+                  {s.code}
+                </pre>
+              </details>
+            )}
+            {"raw" in s && s.raw && (
+              <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap text-xs text-neutral-600">
+                {s.raw}
+              </pre>
+            )}
+          </div>
+        </Card>
+      );
+    }
+    case "done":
+      return (
+        <div className="rounded-xl bg-emerald-50 px-4 py-3 text-center text-sm font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+          ✅ クエスト完了！ はたらきバチたちが成果を納品した
+        </div>
+      );
+    case "error":
+      return (
+        <div className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-300">
+          ⚠️ エラー：{it.message}
+        </div>
+      );
+  }
+}
