@@ -10,12 +10,14 @@ from google.adk import Agent
 
 from agents.orchestrator.schemas import DesignSpec
 from shared.models import FLASH
+from shared.skills import skill_toolset
 
 designer_agent = Agent(
     name="designer",
     model=FLASH,
     description="発注内容からAPIの設計仕様（エンドポイント・ファイル構成）を起こす設計担当",
     output_schema=DesignSpec,
+    tools=[skill_toolset("api-design")],
     instruction=(
         "あなたはソフトウェア設計者です。与えられた発注内容を読み、"
         "FastAPI で実装する前提の設計仕様を作成してください。\n"

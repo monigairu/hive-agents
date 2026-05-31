@@ -11,12 +11,14 @@ from google.adk import Agent
 
 from agents.orchestrator.schemas import TestResult
 from shared.models import FLASH
+from shared.skills import skill_toolset
 
 tester_agent = Agent(
     name="tester",
     model=FLASH,
     description="実装コードに対するpytestテストを生成するテスト担当",
     output_schema=TestResult,
+    tools=[skill_toolset("pytest", "python-style")],
     instruction=(
         "あなたはテストエンジニアです。前段(implementer)が出力した実装結果のJSON"
         "（code フィールドに FastAPI のコードが入っている）をテキストで受け取ります。"

@@ -10,12 +10,14 @@ from google.adk import Agent
 
 from agents.orchestrator.schemas import ImplementationResult
 from shared.models import FLASH
+from shared.skills import skill_toolset
 
 implementer_agent = Agent(
     name="implementer",
     model=FLASH,
     description="設計仕様から動作するFastAPIコードを生成する実装担当",
     output_schema=ImplementationResult,
+    tools=[skill_toolset("python-style", "fastapi")],
     instruction=(
         "あなたは実装エンジニアです。前段(designer)が出力した設計仕様のJSON"
         "（overview / endpoints / file_structure / notes を持つ）をテキストで受け取ります。"
