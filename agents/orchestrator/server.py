@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 
@@ -29,6 +30,17 @@ from starlette.routing import Route
 
 from agents.orchestrator.router import classify
 from agents.orchestrator.workflow import build_workflow
+from shared.sandbox import verify_fastapi
+
+
+def _field(json_text: str | None, key: str) -> str:
+    """Agent出力のJSONテキストから1フィールドを安全に取り出す。"""
+    if not json_text:
+        return ""
+    try:
+        return str(json.loads(json_text).get(key, "") or "")
+    except (json.JSONDecodeError, AttributeError):
+        return ""
 
 APP_NAME = "hive-orchestrator"
 DEFAULT_TASK = "タスク管理のCRUD APIをFastAPIで作って"
@@ -62,6 +74,7 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
     message = types.Content(role="user", parts=[types.Part(text=task)])
 
     last_author: str | None = None
+    outputs: dict[str, str] = {}
     try:
         async for event in runner.run_async(
             user_id="ui", session_id=session.id, new_message=message
@@ -72,6 +85,7 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                 text = "".join(p.text for p in event.content.parts if p.text)
             if not author or not text:
                 continue
+            outputs[author] = text  # 最新の出力を保持（検証で使う）
             # 新しいAgentが喋り始めた → 「思考中」演出の起点
             if author != last_author:
                 yield _sse("agent_start", agent=author, role=AGENT_ROLE.get(author, ""))
@@ -81,6 +95,18 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                 agent=author,
                 role=AGENT_ROLE.get(author, ""),
                 text=text,
+            )
+
+        # サンドボックス自己検証（F-04）：生成コード+テストを実走して判定
+        code = _field(outputs.get("implementer"), "code")
+        test_code = _field(outputs.get("tester"), "test_code")
+        if code and test_code:
+            yield _sse("verify_start")
+            result = await asyncio.to_thread(verify_fastapi, code, test_code)
+            yield _sse(
+                "verify_result",
+                passed=result.passed,
+                output=result.output[-1500:],
             )
         yield _sse("done")
     except Exception as exc:  # noqa: BLE001 - UIにエラーを流して終了

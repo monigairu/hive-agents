@@ -17,6 +17,8 @@ type TimelineItem =
   | { id: number; kind: "router"; taskType: string; scale: string }
   | { id: number; kind: "thinking"; agent: string; role: string }
   | { id: number; kind: "output"; agent: string; role: string; text: string }
+  | { id: number; kind: "verifying" }
+  | { id: number; kind: "verify"; passed: boolean; output: string }
   | { id: number; kind: "done" }
   | { id: number; kind: "error"; message: string };
 
@@ -79,6 +81,21 @@ export default function Home() {
         return [
           ...filtered,
           { id: nextId(), kind: "output", agent: d.agent, role: d.role, text: d.text },
+        ];
+      });
+    });
+    on("verify_start", () => push({ id: nextId(), kind: "verifying" }));
+    on("verify_result", (d) => {
+      setItems((prev) => {
+        const filtered = prev.filter((it) => it.kind !== "verifying");
+        return [
+          ...filtered,
+          {
+            id: nextId(),
+            kind: "verify",
+            passed: String(d.passed) === "true",
+            output: d.output,
+          },
         ];
       });
     });
@@ -222,6 +239,41 @@ function renderItem(it: TimelineItem) {
         </Card>
       );
     }
+    case "verifying":
+      return (
+        <Card>
+          <div className="flex w-16 shrink-0 flex-col items-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-neutral-100 text-2xl ring-2 ring-emerald-400 dark:bg-neutral-800">
+              🧪
+            </div>
+            <span className="mt-1 text-[10px] text-neutral-500">けんしょう</span>
+          </div>
+          <div className="flex items-center text-sm text-neutral-500">
+            サンドボックスで実際に起動してテスト中
+            <span className="ml-1 inline-flex animate-pulse">…</span>
+          </div>
+        </Card>
+      );
+    case "verify":
+      return (
+        <div
+          className={`rounded-xl px-4 py-3 text-sm ${
+            it.passed
+              ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
+              : "bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-200"
+          }`}
+        >
+          <div className="font-semibold">
+            {it.passed ? "🧪✅ サンドボックス検証：テスト通過（コードは実際に動く）" : "🧪❌ サンドボックス検証：テスト失敗"}
+          </div>
+          <details className="mt-1">
+            <summary className="cursor-pointer text-xs opacity-70">pytest の出力</summary>
+            <pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-neutral-950 p-3 text-[11px] text-neutral-100">
+              {it.output}
+            </pre>
+          </details>
+        </div>
+      );
     case "done":
       return (
         <div className="rounded-xl bg-emerald-50 px-4 py-3 text-center text-sm font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
