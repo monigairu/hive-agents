@@ -20,6 +20,7 @@ type TimelineItem =
   | { id: number; kind: "output"; agent: string; role: string; text: string }
   | { id: number; kind: "verifying" }
   | { id: number; kind: "verify"; passed: boolean; output: string }
+  | { id: number; kind: "retry"; attempt: number; max: number; reason: string }
   | { id: number; kind: "remember"; success: boolean; title: string; forgotten: number }
   | { id: number; kind: "done" }
   | { id: number; kind: "error"; message: string };
@@ -113,6 +114,15 @@ export default function Home() {
         success: d.kind === "success",
         title: d.title,
         forgotten: Number(d.forgotten ?? 0),
+      }),
+    );
+    on("retry", (d) =>
+      push({
+        id: nextId(),
+        kind: "retry",
+        attempt: Number(d.attempt),
+        max: Number(d.max),
+        reason: d.reason ?? "",
       }),
     );
     on("done", () => {
@@ -299,6 +309,15 @@ function renderItem(it: TimelineItem) {
               {it.output}
             </pre>
           </details>
+        </div>
+      );
+    case "retry":
+      return (
+        <div className="rounded-xl bg-orange-50 px-4 py-3 text-sm text-orange-900 dark:bg-orange-950/40 dark:text-orange-200">
+          <div className="font-semibold">
+            🔁 検証に失敗 → 修正してやり直し（試行 {it.attempt}/{it.max}）
+          </div>
+          {it.reason && <p className="mt-0.5 text-xs text-orange-700 dark:text-orange-300">理由：{it.reason}</p>}
         </div>
       );
     case "remember":

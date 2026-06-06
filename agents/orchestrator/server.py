@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 
 from google.adk.runners import InMemoryRunner
@@ -28,8 +29,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from agents.implementer.agent import implementer_agent
 from agents.orchestrator.router import classify
 from agents.orchestrator.workflow import build_workflow
+from agents.tester.agent import tester_agent
 from shared.memory import ReasoningBank, render_memories
 from shared.sandbox import VerificationResult, verify_fastapi
 from shared.telemetry import agent_span, setup_tracing
@@ -64,11 +67,46 @@ def _sse(event_type: str, **payload) -> dict:
     return {"event": event_type, "data": json.dumps(payload, ensure_ascii=False)}
 
 
-async def _run_stream(task: str) -> AsyncIterator[dict]:
-    """ワークフローを実行し、進捗を SSE イベントとして逐次 yield する。"""
-    yield _sse("task_received", task=task)
+MAX_ATTEMPTS = int(os.environ.get("HIVE_MAX_ATTEMPTS", "3"))
+# デモ/テスト用：最初の N 回の検証を強制的に失敗扱いにし、修正ループを観察できる。
+_DEMO_FAIL = int(os.environ.get("HIVE_DEMO_FAIL_ATTEMPTS", "0"))
 
-    # router（Functionノード相当）の判断を可視化
+
+async def _invoke(agent, prompt: str, out: dict) -> AsyncIterator[dict]:
+    """単一Agentを実行し、進捗イベントを yield しつつ最終テキストを out["text"] に残す。"""
+    runner = InMemoryRunner(agent=agent, app_name=APP_NAME)
+    session = await runner.session_service.create_session(app_name=APP_NAME, user_id="ui")
+    message = types.Content(role="user", parts=[types.Part(text=prompt)])
+    role = AGENT_ROLE.get(agent.name, "")
+    yield _sse("agent_start", agent=agent.name, role=role)
+    async for event in runner.run_async(
+        user_id="ui", session_id=session.id, new_message=message
+    ):
+        if event.content and event.content.parts:
+            text = "".join(p.text for p in event.content.parts if p.text)
+            if text:
+                out["text"] = text
+                yield _sse("agent_output", agent=agent.name, role=role, text=text)
+
+
+async def _verify(code: str, test_code: str, attempt: int) -> VerificationResult:
+    """サンドボックス検証。デモ用に最初の _DEMO_FAIL 回は強制失敗扱い。"""
+    if _DEMO_FAIL and attempt <= _DEMO_FAIL:
+        return VerificationResult(
+            passed=False,
+            returncode=1,
+            output=f"[デモ] 試行 {attempt} を意図的に失敗扱い（修正ループ確認用）",
+        )
+    with agent_span("hive.verify", operation="execute_tool", agent="sandbox") as span:
+        result = await asyncio.to_thread(verify_fastapi, code, test_code)
+        if span:
+            span.set_attribute("verify.passed", result.passed)
+    return result
+
+
+async def _run_stream(task: str) -> AsyncIterator[dict]:
+    """発注→（実装→検証→失敗なら修正）ループ→記録、を SSE で逐次配信する（F-04）。"""
+    yield _sse("task_received", task=task)
     decision = classify(task)
     task_type = decision["task_type"]
     yield _sse("router", task_type=task_type, scale=decision["scale"])
@@ -77,19 +115,16 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
     memories = _bank.retrieve(task, task_type)
     if memories:
         yield _sse("memory_recall", lessons=[m.title for m in memories])
-    message = types.Content(
-        role="user", parts=[types.Part(text=render_memories(memories) + task)]
-    )
+    base_prompt = render_memories(memories) + task
 
-    workflow = build_workflow()
-    runner = InMemoryRunner(agent=workflow, app_name=APP_NAME)
-    session = await runner.session_service.create_session(
-        app_name=APP_NAME, user_id="ui"
-    )
-
-    last_author: str | None = None
     outputs: dict[str, str] = {}
+    result: VerificationResult | None = None
     try:
+        # 試行1：WorkflowAgent グラフ（router→designer→implementer→tester）
+        runner = InMemoryRunner(agent=build_workflow(), app_name=APP_NAME)
+        session = await runner.session_service.create_session(app_name=APP_NAME, user_id="ui")
+        message = types.Content(role="user", parts=[types.Part(text=base_prompt)])
+        last_author: str | None = None
         with agent_span("hive.workflow", operation="invoke_agent", **decision):
             async for event in runner.run_async(
                 user_id="ui", session_id=session.id, new_message=message
@@ -100,33 +135,50 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                     text = "".join(p.text for p in event.content.parts if p.text)
                 if not author or not text:
                     continue
-                outputs[author] = text  # 最新の出力を保持（検証で使う）
-                # 新しいAgentが喋り始めた → 「思考中」演出の起点
+                outputs[author] = text
                 if author != last_author:
                     yield _sse("agent_start", agent=author, role=AGENT_ROLE.get(author, ""))
                     last_author = author
-                yield _sse(
-                    "agent_output",
-                    agent=author,
-                    role=AGENT_ROLE.get(author, ""),
-                    text=text,
-                )
+                yield _sse("agent_output", agent=author, role=AGENT_ROLE.get(author, ""), text=text)
 
-        # サンドボックス自己検証（F-04）：生成コード+テストを実走して判定
-        code = _field(outputs.get("implementer"), "code")
-        test_code = _field(outputs.get("tester"), "test_code")
-        if code and test_code:
-            yield _sse("verify_start")
-            with agent_span("hive.verify", operation="execute_tool", agent="sandbox") as span:
-                result = await asyncio.to_thread(verify_fastapi, code, test_code)
-                if span:
-                    span.set_attribute("verify.passed", result.passed)
+        design = outputs.get("designer", "")
+
+        # 検証→失敗なら implementer/tester を修正再実行（F-04 自走ループ・最大 MAX_ATTEMPTS 回）
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            code = _field(outputs.get("implementer"), "code")
+            test_code = _field(outputs.get("tester"), "test_code")
+            if not (code and test_code):
+                break
+            yield _sse("verify_start", attempt=attempt)
+            result = await _verify(code, test_code, attempt)
             yield _sse(
-                "verify_result",
-                passed=result.passed,
-                output=result.output[-1500:],
+                "verify_result", passed=result.passed, attempt=attempt, output=result.output[-1500:]
             )
-            # 経験の蓄積（F-09）：検証結果から教訓を書き戻し、古い記憶を忘却する
+            if result.passed or attempt == MAX_ATTEMPTS:
+                break
+
+            # 失敗 → 修正サイクル（implementer に失敗ログを渡して作り直す）
+            yield _sse("retry", attempt=attempt + 1, max=MAX_ATTEMPTS, reason=result.headline())
+            fix_prompt = (
+                f"{base_prompt}\n\n[設計]\n{design}\n\n"
+                f"[前回の実装]\n{code}\n\n"
+                f"[検証の失敗ログ(pytest)]\n{result.output[-1200:]}\n\n"
+                "この失敗を必ず修正した、完全に動作する実装を作り直してください。"
+            )
+            impl_out: dict = {}
+            async for ev in _invoke(implementer_agent, fix_prompt, impl_out):
+                yield ev
+            if impl_out.get("text"):
+                outputs["implementer"] = impl_out["text"]
+            # 新しい実装に合わせてテストも作り直す
+            test_out: dict = {}
+            async for ev in _invoke(tester_agent, outputs["implementer"], test_out):
+                yield ev
+            if test_out.get("text"):
+                outputs["tester"] = test_out["text"]
+
+        # 経験の蓄積（F-09）：最終結果から教訓を書き戻し、古い記憶を忘却する
+        if result is not None:
             yield _sse("memory_write", **_remember(task_type, outputs, result))
         yield _sse("done")
     except Exception as exc:  # noqa: BLE001 - UIにエラーを流して終了
