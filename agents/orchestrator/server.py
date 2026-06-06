@@ -28,6 +28,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from agents.orchestrator.retry import MAX_ATTEMPTS, build_attempt_message
 from agents.orchestrator.router import classify
 from agents.orchestrator.workflow import build_workflow
 from shared.memory import ReasoningBank, render_memories
@@ -64,8 +65,41 @@ def _sse(event_type: str, **payload) -> dict:
     return {"event": event_type, "data": json.dumps(payload, ensure_ascii=False)}
 
 
+async def _run_pipeline(
+    runner: InMemoryRunner,
+    session_id: str,
+    message: types.Content,
+    outputs: dict[str, str],
+    attempt: int,
+    decision: dict[str, str],
+) -> AsyncIterator[dict]:
+    """ワークフローを1回実行し、各Agentの出力をSSEで流しつつ outputs を埋める。"""
+    last_author: str | None = None
+    with agent_span("hive.workflow", operation="invoke_agent", attempt=attempt, **decision):
+        async for event in runner.run_async(
+            user_id="ui", session_id=session_id, new_message=message
+        ):
+            author = getattr(event, "author", None)
+            text = ""
+            if event.content and event.content.parts:
+                text = "".join(p.text for p in event.content.parts if p.text)
+            if not author or not text:
+                continue
+            outputs[author] = text  # 最新の出力を保持（検証で使う）
+            # 新しいAgentが喋り始めた → 「思考中」演出の起点
+            if author != last_author:
+                yield _sse("agent_start", agent=author, role=AGENT_ROLE.get(author, ""))
+                last_author = author
+            yield _sse("agent_output", agent=author, role=AGENT_ROLE.get(author, ""), text=text)
+
+
 async def _run_stream(task: str) -> AsyncIterator[dict]:
-    """ワークフローを実行し、進捗を SSE イベントとして逐次 yield する。"""
+    """発注を自己修正ループで実行し、進捗を SSE イベントとして逐次 yield する。
+
+    検証が通るまで最大 MAX_ATTEMPTS 回リトライ（F-04）。各試行に元の発注と前回の
+    失敗要因を再注入し（目標再注入）、試行間で通過テスト数が最大の成果物を採用する
+    （Best-of-N・実行接地の選別）。
+    """
     yield _sse("task_received", task=task)
 
     # router（Functionノード相当）の判断を可視化
@@ -73,61 +107,61 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
     task_type = decision["task_type"]
     yield _sse("router", task_type=task_type, scale=decision["scale"])
 
-    # 経験の想起（F-08）：同種タスクの教訓を検索し、タスク文の先頭に注入する
+    # 経験の想起（F-08）：同種タスクの教訓を検索し、各試行の先頭に注入する文脈にする
     memories = _bank.retrieve(task, task_type)
     if memories:
         yield _sse("memory_recall", lessons=[m.title for m in memories])
-    message = types.Content(
-        role="user", parts=[types.Part(text=render_memories(memories) + task)]
-    )
+    context = render_memories(memories)
 
-    workflow = build_workflow()
-    runner = InMemoryRunner(agent=workflow, app_name=APP_NAME)
-    session = await runner.session_service.create_session(
-        app_name=APP_NAME, user_id="ui"
-    )
-
-    last_author: str | None = None
-    outputs: dict[str, str] = {}
+    runner = InMemoryRunner(agent=build_workflow(), app_name=APP_NAME)
+    best: VerificationResult | None = None
+    best_outputs: dict[str, str] = {}
+    feedback = ""
     try:
-        with agent_span("hive.workflow", operation="invoke_agent", **decision):
-            async for event in runner.run_async(
-                user_id="ui", session_id=session.id, new_message=message
-            ):
-                author = getattr(event, "author", None)
-                text = ""
-                if event.content and event.content.parts:
-                    text = "".join(p.text for p in event.content.parts if p.text)
-                if not author or not text:
-                    continue
-                outputs[author] = text  # 最新の出力を保持（検証で使う）
-                # 新しいAgentが喋り始めた → 「思考中」演出の起点
-                if author != last_author:
-                    yield _sse("agent_start", agent=author, role=AGENT_ROLE.get(author, ""))
-                    last_author = author
-                yield _sse(
-                    "agent_output",
-                    agent=author,
-                    role=AGENT_ROLE.get(author, ""),
-                    text=text,
-                )
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            if attempt > 1:
+                yield _sse("retry", attempt=attempt, reason=feedback)
+            # 試行ごとに独立セッション＝前回の履歴に汚染されない決定論的な再実行
+            session = await runner.session_service.create_session(
+                app_name=APP_NAME, user_id="ui"
+            )
+            message = types.Content(
+                role="user",
+                parts=[types.Part(text=build_attempt_message(context, task, attempt, feedback))],
+            )
+            outputs: dict[str, str] = {}
+            async for evt in _run_pipeline(runner, session.id, message, outputs, attempt, decision):
+                yield evt
 
-        # サンドボックス自己検証（F-04）：生成コード+テストを実走して判定
-        code = _field(outputs.get("implementer"), "code")
-        test_code = _field(outputs.get("tester"), "test_code")
-        if code and test_code:
-            yield _sse("verify_start")
+            # サンドボックス自己検証（F-04）：生成コード+テストを実走して判定
+            code = _field(outputs.get("implementer"), "code")
+            test_code = _field(outputs.get("tester"), "test_code")
+            if not (code and test_code):
+                break  # 検証材料が無ければリトライしても無意味
+
+            yield _sse("verify_start", attempt=attempt)
             with agent_span("hive.verify", operation="execute_tool", agent="sandbox") as span:
                 result = await asyncio.to_thread(verify_fastapi, code, test_code)
                 if span:
                     span.set_attribute("verify.passed", result.passed)
             yield _sse(
                 "verify_result",
+                attempt=attempt,
                 passed=result.passed,
+                passed_count=result.passed_count,
                 output=result.output[-1500:],
             )
-            # 経験の蓄積（F-09）：検証結果から教訓を書き戻し、古い記憶を忘却する
-            yield _sse("memory_write", **_remember(task_type, outputs, result))
+
+            # Best-of-N（実行接地）：通過テスト数が最大の試行を最良として保持
+            if best is None or result.passed_count > best.passed_count:
+                best, best_outputs = result, outputs
+            if result.passed:
+                break  # 適応的停止：全テスト通過で即終了
+            feedback = result.headline()
+
+        # 経験の蓄積（F-09）：最良の試行から教訓を書き戻し、古い記憶を忘却する
+        if best is not None:
+            yield _sse("memory_write", **_remember(task_type, best_outputs, best))
         yield _sse("done")
     except Exception as exc:  # noqa: BLE001 - UIにエラーを流して終了
         yield _sse("error", message=str(exc))

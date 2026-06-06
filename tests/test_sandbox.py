@@ -1,8 +1,8 @@
-"""shared/sandbox.py の VerificationResult.headline() の単体テスト。"""
+"""shared/sandbox.py の VerificationResult.headline() / count_passed() の単体テスト。"""
 
 from __future__ import annotations
 
-from shared.sandbox import VerificationResult
+from shared.sandbox import VerificationResult, count_passed
 
 
 def test_headline_passed():
@@ -19,3 +19,12 @@ def test_headline_extracts_error_line():
 def test_headline_fallback_without_error_line():
     result = VerificationResult(passed=False, returncode=2, output="collected 0 items")
     assert "returncode=2" in result.headline()
+
+
+def test_count_passed_extracts_number():
+    assert count_passed("4 passed in 0.3s") == 4
+    assert count_passed("3 passed, 1 failed in 0.5s") == 3
+
+
+def test_count_passed_zero_when_absent():
+    assert count_passed("collection error") == 0

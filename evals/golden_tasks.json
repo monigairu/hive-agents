@@ -1,0 +1,33 @@
+{
+  "threshold": 0.5,
+  "tasks": [
+    {
+      "id": "todo-crud",
+      "task": "タスク管理のCRUD APIをFastAPIで作って",
+      "task_type": "api",
+      "scale": "light",
+      "must_pass_tests": true
+    },
+    {
+      "id": "note-api",
+      "task": "メモを作成・取得・更新・削除できるAPIを作って",
+      "task_type": "api",
+      "scale": "light",
+      "must_pass_tests": true
+    },
+    {
+      "id": "lp-basic",
+      "task": "商品紹介のランディングページをHTMLで作って",
+      "task_type": "lp",
+      "scale": "light",
+      "must_pass_tests": false
+    },
+    {
+      "id": "inventory-system",
+      "task": "在庫管理システムのAPIを作ってほしい。商品の登録・一覧取得・単体取得・更新・削除という基本のCRUDに加えて、在庫数の増減（入庫・出庫）を扱うエンドポイント、入出庫の履歴を時系列で記録して取得できる仕組み、在庫が事前に設定したしきい値を下回ったときに警告フラグを返す機能、商品をカテゴリ別に集計して在庫総数や金額を返すエンドポイントまで含めて設計したい。すべてインメモリで構いませんが、各機能が pytest で機械的に検証できるよう、テストしやすい構成で実装してください。",
+      "task_type": "api",
+      "scale": "heavy",
+      "must_pass_tests": true
+    }
+  ]
+}
