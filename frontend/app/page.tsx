@@ -21,6 +21,7 @@ type TimelineItem =
   | { id: number; kind: "verifying" }
   | { id: number; kind: "verify"; passed: boolean; output: string }
   | { id: number; kind: "retry"; attempt: number; max: number; reason: string }
+  | { id: number; kind: "escalation"; agent: string; toModel: string }
   | { id: number; kind: "remember"; success: boolean; title: string; forgotten: number }
   | { id: number; kind: "done" }
   | { id: number; kind: "error"; message: string };
@@ -124,6 +125,9 @@ export default function Home() {
         max: Number(d.max),
         reason: d.reason ?? "",
       }),
+    );
+    on("escalation", (d) =>
+      push({ id: nextId(), kind: "escalation", agent: d.agent, toModel: d.to_model }),
     );
     on("done", () => {
       push({ id: nextId(), kind: "done" });
@@ -318,6 +322,15 @@ function renderItem(it: TimelineItem) {
             🔁 検証に失敗 → 修正してやり直し（試行 {it.attempt}/{it.max}）
           </div>
           {it.reason && <p className="mt-0.5 text-xs text-orange-700 dark:text-orange-300">理由：{it.reason}</p>}
+        </div>
+      );
+    case "escalation":
+      return (
+        <div className="rounded-xl bg-fuchsia-50 px-4 py-3 text-sm text-fuchsia-900 dark:bg-fuchsia-950/40 dark:text-fuchsia-200">
+          <div className="font-semibold">⚔️→🔮 しょうかんかいじょ！ あたらしい仲間がくわわった</div>
+          <p className="mt-0.5 text-xs text-fuchsia-700 dark:text-fuchsia-300">
+            {it.agent} を上位モデル（{it.toModel}）に格上げして再挑戦
+          </p>
         </div>
       );
     case "remember":
