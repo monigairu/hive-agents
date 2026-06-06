@@ -15,10 +15,12 @@ const JOB: Record<string, { emoji: string; job: string; ring: string }> = {
 type TimelineItem =
   | { id: number; kind: "task"; task: string }
   | { id: number; kind: "router"; taskType: string; scale: string }
+  | { id: number; kind: "recall"; lessons: string[] }
   | { id: number; kind: "thinking"; agent: string; role: string }
   | { id: number; kind: "output"; agent: string; role: string; text: string }
   | { id: number; kind: "verifying" }
   | { id: number; kind: "verify"; passed: boolean; output: string }
+  | { id: number; kind: "remember"; success: boolean; title: string; forgotten: number }
   | { id: number; kind: "done" }
   | { id: number; kind: "error"; message: string };
 
@@ -58,8 +60,10 @@ export default function Home() {
     const es = new EventSource(`${API}/stream?task=${encodeURIComponent(task)}`);
     esRef.current = es;
 
-    // カスタムイベントは Event 型で渡るため MessageEvent にキャストして data を読む
-    const on = (name: string, fn: (data: Record<string, string>) => void) =>
+    // カスタムイベントは Event 型で渡るため MessageEvent にキャストして data を読む。
+    // SSEペイロードは動的なため data は any 扱い（型はTimelineItem側で固定する）。
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const on = (name: string, fn: (data: any) => void) =>
       es.addEventListener(name, (e) => {
         const raw = (e as MessageEvent).data;
         fn(raw ? JSON.parse(raw) : {});
@@ -68,6 +72,9 @@ export default function Home() {
     on("task_received", (d) => push({ id: nextId(), kind: "task", task: d.task }));
     on("router", (d) =>
       push({ id: nextId(), kind: "router", taskType: d.task_type, scale: d.scale }),
+    );
+    on("memory_recall", (d) =>
+      push({ id: nextId(), kind: "recall", lessons: d.lessons ?? [] }),
     );
     on("agent_start", (d) =>
       push({ id: nextId(), kind: "thinking", agent: d.agent, role: d.role }),
@@ -99,6 +106,15 @@ export default function Home() {
         ];
       });
     });
+    on("memory_write", (d) =>
+      push({
+        id: nextId(),
+        kind: "remember",
+        success: d.kind === "success",
+        title: d.title,
+        forgotten: Number(d.forgotten ?? 0),
+      }),
+    );
     on("done", () => {
       push({ id: nextId(), kind: "done" });
       setRunning(false);
@@ -189,6 +205,17 @@ function renderItem(it: TimelineItem) {
           ⚙️ ルーター判定：種別 <b>{it.taskType}</b> / 規模 <b>{it.scale}</b> → はたらきバチを編成
         </div>
       );
+    case "recall":
+      return (
+        <div className="rounded-xl bg-indigo-50 px-4 py-3 text-sm text-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-200">
+          <div className="font-semibold">💭 過去の教訓を想起（同種タスクの経験から）</div>
+          <ul className="mt-1 list-disc pl-5 text-indigo-700 dark:text-indigo-300">
+            {it.lessons.map((l, i) => (
+              <li key={i}>{l}</li>
+            ))}
+          </ul>
+        </div>
+      );
     case "thinking":
       return (
         <Card>
@@ -272,6 +299,15 @@ function renderItem(it: TimelineItem) {
               {it.output}
             </pre>
           </details>
+        </div>
+      );
+    case "remember":
+      return (
+        <div className="rounded-xl bg-indigo-50 px-4 py-3 text-sm text-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-200">
+          🧠 教訓を記録（{it.success ? "成功" : "失敗"}）：{it.title}
+          {it.forgotten > 0 && (
+            <span className="ml-1 text-xs text-indigo-500">／古い記憶を{it.forgotten}件忘却</span>
+          )}
         </div>
       );
     case "done":
