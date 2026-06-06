@@ -23,6 +23,16 @@ class VerificationResult(BaseModel):
     returncode: int = Field(description="pytest プロセスの終了コード")
     output: str = Field(description="stdout/stderr（末尾を抜粋）")
 
+    def headline(self) -> str:
+        """結果を1行に要約する（メモリ記録・UI表示用）。失敗時は要因行を抜き出す。"""
+        if self.passed:
+            return "全テスト通過"
+        for line in reversed(self.output.splitlines()):
+            stripped = line.strip()
+            if stripped.startswith(("E ", "FAILED", "assert")) or "Error" in stripped:
+                return stripped[:200]
+        return f"テスト失敗 (returncode={self.returncode})"
+
 
 def verify_fastapi(code: str, test_code: str, timeout: int = 180) -> VerificationResult:
     """生成コード(main.py)とテスト(test_main.py)を隔離環境で実行して判定する。"""
