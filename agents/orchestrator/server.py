@@ -29,11 +29,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from agents.implementer.agent import implementer_agent
+from agents.implementer.agent import implementer_agent, make_implementer
 from agents.orchestrator.router import classify
 from agents.orchestrator.workflow import build_workflow
 from agents.tester.agent import tester_agent
 from shared.memory import ReasoningBank, render_memories
+from shared.models import PRO
 from shared.sandbox import VerificationResult, verify_fastapi
 from shared.telemetry import agent_span, setup_tracing
 
@@ -165,8 +166,13 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                 f"[検証の失敗ログ(pytest)]\n{result.output[-1200:]}\n\n"
                 "この失敗を必ず修正した、完全に動作する実装を作り直してください。"
             )
+            # F-13 交代：最終試行はモデルを格上げ（Flash→Pro）した新インスタンスに交代
+            implementer = implementer_agent
+            if attempt + 1 == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
+                yield _sse("escalation", agent="implementer", to_model=PRO)
+                implementer = make_implementer(PRO)
             impl_out: dict = {}
-            async for ev in _invoke(implementer_agent, fix_prompt, impl_out):
+            async for ev in _invoke(implementer, fix_prompt, impl_out):
                 yield ev
             if impl_out.get("text"):
                 outputs["implementer"] = impl_out["text"]
