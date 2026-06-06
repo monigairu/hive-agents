@@ -40,6 +40,8 @@
 
 ## 3. 「最新Tech」導入推奨（優先度順）
 
+> **実装状況**：本ブランチで **#1 ReasoningBank型メモリ**（`shared/memory.py`）と **#2 OpenTelemetry-GenAI**（`shared/telemetry.py`）を実装し、`agents/orchestrator/server.py` のSSEループに「想起→注入→検証→書き戻し→忘却」として配線済み。#3〜#6 は後続。
+
 ### P1（効果大・既存に差し込み可）
 
 1. **ReasoningBank型メモリ層**（F-08/F-09強化）— 成功・失敗の両方から再利用可能戦略を蒸留→実行時検索→書戻し。Google純正研究なのでGCPネイティブの物語と完全整合。`(ベンチ値は著者自己申告 → デモは「同じ失敗を回避」の定性実演で見せる)`

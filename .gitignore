@@ -219,3 +219,6 @@ __marimo__/
 
 # Hive ローカルAgentサーバの実行時ファイル
 .run/
+
+# Hive ReasoningBank メモリの実行時ファイル（F-08）
+.hive/

@@ -7,6 +7,13 @@ dependencies = [
     "google-adk[a2a]>=2.1,<3",
 ]
 
+[project.optional-dependencies]
+# OTel トレース（F-14）。未導入なら shared/telemetry.py は no-op で動く。
+telemetry = [
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

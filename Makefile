@@ -3,10 +3,13 @@
 SHELL := /bin/bash
 ENV := set -a && source .env && set +a
 
-.PHONY: help smoke run-local serve-agents stop-agents status run-a2a serve-orchestrator ui
+.PHONY: help test smoke run-local serve-agents stop-agents status run-a2a serve-orchestrator ui
 
 help: ## このヘルプを表示
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+
+test: ## 単体テスト（google-adk非依存・隔離環境で実行）
+	uv run --no-project --with pydantic --with pytest python -m pytest tests -q
 
 smoke: ## M0: ADK→Gemini 疎通確認
 	$(ENV) && uv run python scripts/m0_smoke.py
