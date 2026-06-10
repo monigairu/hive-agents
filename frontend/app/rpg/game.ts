@@ -445,16 +445,29 @@ class HiveRpgScene extends Phaser.Scene {
         );
       }
       case "verify_start":
-        this.addMessage("サンドボックスで コードを ためしている…");
+        this.addMessage(
+          String(d.mode) === "page"
+            ? "ページが ちゃんと できているか しらべている…"
+            : "サンドボックスで コードを ためしている…",
+        );
         return this.finish(700);
       case "verify_result": {
         const passed = String(d.passed) === "true";
+        const isPage = String(d.mode) === "page";
         if (passed) {
           this.cameras.main.flash(300, 52, 211, 153);
-          this.addMessage("けんしょう クリア！ コードは ほんとうに うごいた");
+          this.addMessage(
+            isPage
+              ? "けんしょう クリア！ ページは ちゃんと できている"
+              : "けんしょう クリア！ コードは ほんとうに うごいた",
+          );
         } else {
           this.cameras.main.shake(300, 0.004);
-          this.addMessage("けんしょう しっぱい… テストが とおらない");
+          this.addMessage(
+            isPage
+              ? "けんしょう しっぱい… ページに もんだいが ある"
+              : "けんしょう しっぱい… テストが とおらない",
+          );
         }
         return this.finish(900);
       }

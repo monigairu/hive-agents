@@ -28,12 +28,15 @@ const EVENTS = [
 
 /** 完了時に表示する成果物（各Agentの最終出力JSONから組み立てる）。 */
 type Artifact = {
+  kind: "api" | "web";
   overview: string;
   endpoints: string[];
   code: string;
   howToVerify: string;
   testSummary: string;
   testCode: string;
+  html: string;
+  designNotes: string;
 };
 
 function buildArtifact(outputs: Record<string, string>): Artifact | null {
@@ -47,15 +50,35 @@ function buildArtifact(outputs: Record<string, string>): Artifact | null {
   const design = parse("designer");
   const impl = parse("implementer");
   const test = parse("tester");
-  if (!impl.code) return null;
+  if (!impl.code && !impl.html) return null;
   return {
+    kind: impl.html ? "web" : "api",
     overview: String(design.overview ?? ""),
     endpoints: (design.endpoints as string[]) ?? [],
     code: String(impl.code ?? ""),
     howToVerify: String(impl.how_to_verify ?? ""),
     testSummary: String(test.summary ?? ""),
     testCode: String(test.test_code ?? ""),
+    html: String(impl.html ?? ""),
+    designNotes: String(impl.design_notes ?? ""),
   };
+}
+
+/** 生成ページを新しいタブで開く。 */
+function openHtml(html: string) {
+  const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+  window.open(url, "_blank", "noopener");
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+/** 生成ページを index.html としてダウンロードする。 */
+function downloadHtml(html: string) {
+  const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "index.html";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 export default function RpgPage() {
@@ -141,7 +164,7 @@ export default function RpgPage() {
           value={task}
           onChange={(e) => setTask(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && start()}
-          placeholder="例: 在庫管理のCRUD APIを作って"
+          placeholder="例: 喫茶店のおしゃれなLPを作って／在庫管理のCRUD APIを作って"
           disabled={running}
         />
         <button
@@ -165,6 +188,43 @@ export default function RpgPage() {
           </h2>
           {artifact.overview && (
             <p className="mt-2 text-neutral-800 dark:text-neutral-200">{artifact.overview}</p>
+          )}
+          {artifact.kind === "web" && (
+            <div className="mt-3 flex flex-col gap-2">
+              {artifact.designNotes && (
+                <p className="text-xs text-neutral-600 dark:text-neutral-400">
+                  🎨 デザイン：{artifact.designNotes}
+                </p>
+              )}
+              <iframe
+                srcDoc={artifact.html}
+                sandbox=""
+                title="できあがったページのプレビュー"
+                className="h-[420px] w-full rounded-lg border border-neutral-300 bg-white"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={() => openHtml(artifact.html)}
+                  className="rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-600"
+                >
+                  🔍 べつタブで ひらく
+                </button>
+                <button
+                  onClick={() => downloadHtml(artifact.html)}
+                  className="rounded-lg border border-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100"
+                >
+                  💾 index.html を ダウンロード
+                </button>
+              </div>
+              <details>
+                <summary className="cursor-pointer text-xs font-semibold text-amber-700">
+                  📜 生成されたHTMLを見る
+                </summary>
+                <pre className="mt-1 max-h-80 overflow-auto rounded-lg bg-neutral-950 p-3 text-[11px] leading-relaxed text-neutral-100">
+                  {artifact.html}
+                </pre>
+              </details>
+            </div>
           )}
           {artifact.endpoints.length > 0 && (
             <div className="mt-3">

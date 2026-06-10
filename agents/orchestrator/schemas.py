@@ -53,6 +53,33 @@ class TestResult(BaseModel):
     summary: str = Field(description="何を検証するテストかの要約")
 
 
+class WebDesignSpec(BaseModel):
+    """web系designer の成果物：ページのデザイン仕様（M8・LPパイプライン）。"""
+
+    overview: str = Field(description="何のページか・誰に向けたページか")
+    personality: str = Field(description="ページの性格（例：高級感／親しみ／ミニマル）")
+    sections: list[str] = Field(
+        default_factory=list,
+        description="セクション構成（例：'ヒーロー：店名＋キャッチコピー＋予約CTA'）",
+    )
+    style_direction: str = Field(
+        description="配色・書体・余白の方向性（例：深緑×生成り、見出しはShippori Mincho）"
+    )
+    notes: str = Field(default="", description="設計上の補足・前提")
+
+
+class WebImplementationResult(BaseModel):
+    """web系implementer の成果物：単一ファイルのHTML（M8・LPパイプライン）。"""
+
+    html: str = Field(description="完全な単一 index.html（CSS/JS内蔵・生のHTMLのみ）")
+    how_to_verify: str = Field(
+        description="確認方法（例：index.html として保存しブラウザで開く。確認すべき見どころ）"
+    )
+    design_notes: str = Field(
+        default="", description="採用したデザイン判断の要約（性格・配色・書体）"
+    )
+
+
 class SecurityFindingItem(BaseModel):
     """security-reviewer の指摘1件（要件 F-15）。ファイルパス・行番号は必須。"""
 

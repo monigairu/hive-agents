@@ -49,7 +49,25 @@ def _node(local_agent: BaseAgent, name: str) -> BaseAgent:
     return local_agent
 
 
-def build_workflow() -> Workflow:
+def build_workflow(task_type: str = "api") -> Workflow:
+    """タスク種別に応じたパイプラインのグラフを組む（F-02 差し込み式）。
+
+    ルーティング判断は呼び出し側が router.classify で行い（コスト$0・決定論的）、
+    ここでは該当する直列パイプラインを返す。
+    - api: designer → implementer → tester（A2A切り替え対応）
+    - lp : web designer → web implementer（M8。当面プロセス内実行のみ）
+    """
+    if task_type == "lp":
+        # 遅延import：APIパイプラインだけ使う場面で余計な依存を引かない
+        from agents.web.agent import web_designer_agent, web_implementer_agent
+
+        return Workflow(
+            name="hive_orchestrator",
+            description="自然言語の発注をWebページパイプライン(designer→implementer)で処理する",
+            edges=[
+                ("START", route_task, web_designer_agent, web_implementer_agent),
+            ],
+        )
     designer = _node(designer_agent, "designer")
     implementer = _node(implementer_agent, "implementer")
     tester = _node(tester_agent, "tester")
