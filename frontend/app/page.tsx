@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRef, useState } from "react";
 
 // Orchestrator(SSE) のエンドポイント。デプロイ時は NEXT_PUBLIC_HIVE_API で差し替え。
@@ -191,14 +192,19 @@ export default function Home() {
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-6 px-4 py-8">
-      <header className="flex items-center gap-3">
-        <span className="text-3xl">🐝</span>
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Hive</h1>
-          <p className="text-sm text-neutral-500">
-            自然言語で発注すると、はたらきバチたちが設計→実装→テストを分担する
-          </p>
+      <header className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="text-3xl">🐝</span>
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">Hive</h1>
+            <p className="text-sm text-neutral-500">
+              自然言語で発注すると、はたらきバチたちが設計→実装→テストを分担する
+            </p>
+          </div>
         </div>
+        <Link href="/rpg" className="shrink-0 text-sm text-amber-600 hover:underline">
+          🎮 RPGモードへ
+        </Link>
       </header>
 
       <div className="flex gap-2">
