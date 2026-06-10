@@ -32,10 +32,17 @@ from starlette.routing import Route
 from agents.implementer.agent import implementer_agent, make_implementer
 from agents.orchestrator.router import classify
 from agents.orchestrator.workflow import build_workflow
+from agents.security_reviewer.agent import security_reviewer_agent
 from agents.tester.agent import tester_agent
 from shared.memory import ReasoningBank, render_memories
 from shared.models import PRO
 from shared.sandbox import VerificationResult, verify_fastapi
+from shared.security_patterns import (
+    SecurityFinding,
+    SecurityReport,
+    merge_review,
+    scan_code,
+)
 from shared.telemetry import agent_span, setup_tracing
 
 
@@ -56,6 +63,7 @@ AGENT_ROLE = {
     "designer": "設計",
     "implementer": "実装",
     "tester": "テスト",
+    "security_reviewer": "セキュリティ監査",
 }
 
 # 経験の蓄積（F-08/F-09）と標準トレース（F-14）はプロセス全体で1つ持つ
@@ -71,6 +79,10 @@ def _sse(event_type: str, **payload) -> dict:
 MAX_ATTEMPTS = int(os.environ.get("HIVE_MAX_ATTEMPTS", "3"))
 # デモ/テスト用：最初の N 回の検証を強制的に失敗扱いにし、修正ループを観察できる。
 _DEMO_FAIL = int(os.environ.get("HIVE_DEMO_FAIL_ATTEMPTS", "0"))
+# F-15 セキュリティ監査： "1"=両層（既定）/ "pattern"=第1層のみ（$0）/ "0"=無効
+_SECURITY = os.environ.get("HIVE_SECURITY", "1")
+# デモ/テスト用：最初の N 回の監査に合成のcritical指摘を注入し、差し戻しを観察できる。
+_DEMO_VULN = int(os.environ.get("HIVE_DEMO_VULN_ATTEMPTS", "0"))
 
 
 async def _invoke(agent, prompt: str, out: dict) -> AsyncIterator[dict]:
@@ -103,6 +115,37 @@ async def _verify(code: str, test_code: str, attempt: int) -> VerificationResult
         if span:
             span.set_attribute("verify.passed", result.passed)
     return result
+
+
+def _numbered(code: str) -> str:
+    """監査用にコードへ行番号を振る（指摘の line と突き合わせるため）。"""
+    return "\n".join(f"{i:4d} | {line}" for i, line in enumerate(code.splitlines(), start=1))
+
+
+def _parse_security(text: str | None) -> SecurityReport | None:
+    """security_reviewer の出力JSONを SecurityReport に変換する（不正なら None）。"""
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        findings = [
+            SecurityFinding(
+                severity=str(f.get("severity", "minor")),
+                file_path=str(f.get("file_path", "main.py")),
+                line=int(f.get("line", 0) or 0),
+                issue=str(f.get("issue", "")),
+                recommendation=str(f.get("recommendation", "")),
+                detected_by="llm",
+            )
+            for f in data.get("findings", [])
+        ]
+        return SecurityReport(
+            passed=bool(data.get("passed", True)),
+            findings=findings,
+            summary=str(data.get("summary", "")),
+        )
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        return None
 
 
 async def _run_stream(task: str) -> AsyncIterator[dict]:
@@ -144,33 +187,23 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
 
         design = outputs.get("designer", "")
 
-        # 検証→失敗なら implementer/tester を修正再実行（F-04 自走ループ・最大 MAX_ATTEMPTS 回）
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            code = _field(outputs.get("implementer"), "code")
-            test_code = _field(outputs.get("tester"), "test_code")
-            if not (code and test_code):
-                break
-            yield _sse("verify_start", attempt=attempt)
-            result = await _verify(code, test_code, attempt)
-            yield _sse(
-                "verify_result", passed=result.passed, attempt=attempt, output=result.output[-1500:]
-            )
-            if result.passed or attempt == MAX_ATTEMPTS:
-                break
+        async def _fix(next_attempt: int, headline: str, failure_block: str) -> AsyncIterator[dict]:
+            """失敗を implementer に差し戻して実装とテストを作り直す（F-04/F-13）。
 
-            # 失敗 → 修正サイクル（implementer に失敗ログを渡して作り直す）
-            yield _sse("retry", attempt=attempt + 1, max=MAX_ATTEMPTS, reason=result.headline())
-            fix_prompt = (
-                f"{base_prompt}\n\n[設計]\n{design}\n\n"
-                f"[前回の実装]\n{code}\n\n"
-                f"[検証の失敗ログ(pytest)]\n{result.output[-1200:]}\n\n"
-                "この失敗を必ず修正した、完全に動作する実装を作り直してください。"
-            )
+            監査・検証役は修正しない原則：レポートを渡し、修正は implementer が行う。
+            """
+            yield _sse("retry", attempt=next_attempt, max=MAX_ATTEMPTS, reason=headline)
             # F-13 交代：最終試行はモデルを格上げ（Flash→Pro）した新インスタンスに交代
             implementer = implementer_agent
-            if attempt + 1 == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
+            if next_attempt == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
                 yield _sse("escalation", agent="implementer", to_model=PRO)
                 implementer = make_implementer(PRO)
+            fix_prompt = (
+                f"{base_prompt}\n\n[設計]\n{design}\n\n"
+                f"[前回の実装]\n{_field(outputs.get('implementer'), 'code')}\n\n"
+                f"{failure_block}\n\n"
+                "上記の問題を必ず修正した、完全に動作する実装を作り直してください。"
+            )
             impl_out: dict = {}
             async for ev in _invoke(implementer, fix_prompt, impl_out):
                 yield ev
@@ -183,12 +216,89 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
             if test_out.get("text"):
                 outputs["tester"] = test_out["text"]
 
+        # 監査→検証→失敗なら修正、の自走ループ（F-04/F-15・最大 MAX_ATTEMPTS 回）
+        sec_report: SecurityReport | None = None
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            code = _field(outputs.get("implementer"), "code")
+            test_code = _field(outputs.get("tester"), "test_code")
+            if not (code and test_code):
+                break
+
+            # --- F-15 セキュリティ監査（implementer の出力直後・サンドボックスの前）---
+            sec_report = None
+            if _SECURITY != "0":
+                yield _sse("security_start", attempt=attempt)
+                pattern_findings = scan_code(code)  # 第1層：決定論的パターン（$0）
+                if _DEMO_VULN and attempt <= _DEMO_VULN:
+                    pattern_findings.append(
+                        SecurityFinding(
+                            severity="critical", line=1,
+                            issue="[デモ] 合成した脆弱性（差し戻し確認用）",
+                            recommendation="HIVE_DEMO_VULN_ATTEMPTS=0 で無効化",
+                        )
+                    )
+                llm_review: SecurityReport | None = None
+                if _SECURITY != "pattern":
+                    # 第2層：security-reviewer（Gemini Pro 固定・implementer とは別個体）
+                    sec_out: dict = {}
+                    async for ev in _invoke(
+                        security_reviewer_agent,
+                        "以下の実装コードを監査してください（行番号付き）。\n\n" + _numbered(code),
+                        sec_out,
+                    ):
+                        yield ev
+                    llm_review = _parse_security(sec_out.get("text"))
+                # 合成判定：LLMがOKでもパターン層がNGならNG（critical 0 件のみ合格）
+                sec_report = merge_review(pattern_findings, llm_review)
+                yield _sse(
+                    "security_result",
+                    passed=sec_report.passed,
+                    summary=sec_report.summary,
+                    findings=[f.model_dump() for f in sec_report.findings[:20]],
+                )
+                if not sec_report.passed:
+                    if attempt == MAX_ATTEMPTS:
+                        break
+                    async for ev in _fix(
+                        attempt + 1,
+                        f"セキュリティ: {sec_report.headline()}",
+                        f"[セキュリティ監査の指摘]\n{sec_report.render()}",
+                    ):
+                        yield ev
+                    continue  # 修正後は再監査からやり直す
+
+            # --- F-04 サンドボックス検証 ---
+            yield _sse("verify_start", attempt=attempt)
+            result = await _verify(code, test_code, attempt)
+            yield _sse(
+                "verify_result", passed=result.passed, attempt=attempt, output=result.output[-1500:]
+            )
+            if result.passed or attempt == MAX_ATTEMPTS:
+                break
+            async for ev in _fix(
+                attempt + 1,
+                result.headline(),
+                f"[検証の失敗ログ(pytest)]\n{result.output[-1200:]}",
+            ):
+                yield ev
+
         # 経験の蓄積（F-09）：最終結果から教訓を書き戻し、古い記憶を忘却する
-        if result is not None:
+        if sec_report is not None and not sec_report.passed:
+            yield _sse("memory_write", **_remember_security(task_type, sec_report))
+        elif result is not None:
             yield _sse("memory_write", **_remember(task_type, outputs, result))
         yield _sse("done")
     except Exception as exc:  # noqa: BLE001 - UIにエラーを流して終了
         yield _sse("error", message=str(exc))
+
+
+def _remember_security(task_type: str, report: SecurityReport) -> dict:
+    """セキュリティ監査の失敗を教訓として記録する（F-08/F-15）。"""
+    head = report.headline()
+    item = _bank.record(
+        task_type, "failure", f"{task_type} セキュリティ: {head[:50]}", f"次回の注意: {head}"
+    )
+    return {"kind": item.kind, "title": item.title, "forgotten": _bank.forget()}
 
 
 def _remember(task_type: str, outputs: dict[str, str], result: VerificationResult) -> dict:
