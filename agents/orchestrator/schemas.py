@@ -51,3 +51,24 @@ class TestResult(BaseModel):
     test_code: str = Field(description="pytest のテストコード")
     how_to_run: str = Field(description="テストの実行方法")
     summary: str = Field(description="何を検証するテストかの要約")
+
+
+class SecurityFindingItem(BaseModel):
+    """security-reviewer の指摘1件（要件 F-15）。ファイルパス・行番号は必須。"""
+
+    severity: str = Field(description='"critical" | "important" | "minor"')
+    file_path: str = Field(default="main.py", description="該当ファイル")
+    line: int = Field(description="提示されたコードの該当行番号")
+    issue: str = Field(description="何が問題か（1〜2文）")
+    recommendation: str = Field(default="", description="推奨する直し方（修正コードは書かない）")
+
+
+class SecurityReviewResult(BaseModel):
+    """security-reviewer の成果物：監査レポート（要件 F-15）。
+
+    レビュアーはコードを修正しない（検証役は修正しない原則・F-04）。
+    """
+
+    passed: bool = Field(description="critical の指摘が無ければ true")
+    findings: list[SecurityFindingItem] = Field(default_factory=list)
+    summary: str = Field(description="1行要約。問題がなければ「問題なし」と書く")

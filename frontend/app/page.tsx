@@ -10,6 +10,15 @@ const JOB: Record<string, { emoji: string; job: string; ring: string }> = {
   designer: { emoji: "🧙", job: "まほうつかい", ring: "ring-violet-400" },
   implementer: { emoji: "⚔️", job: "せんし", ring: "ring-amber-400" },
   tester: { emoji: "⛪", job: "そうりょ", ring: "ring-sky-400" },
+  security_reviewer: { emoji: "🛡️", job: "けんじゃ", ring: "ring-rose-400" },
+};
+
+type SecurityFinding = {
+  severity: string;
+  file_path: string;
+  line: number;
+  issue: string;
+  recommendation?: string;
 };
 
 type TimelineItem =
@@ -20,6 +29,14 @@ type TimelineItem =
   | { id: number; kind: "output"; agent: string; role: string; text: string }
   | { id: number; kind: "verifying" }
   | { id: number; kind: "verify"; passed: boolean; output: string }
+  | { id: number; kind: "securing" }
+  | {
+      id: number;
+      kind: "security";
+      passed: boolean;
+      summary: string;
+      findings: SecurityFinding[];
+    }
   | { id: number; kind: "retry"; attempt: number; max: number; reason: string }
   | { id: number; kind: "escalation"; agent: string; toModel: string }
   | { id: number; kind: "remember"; success: boolean; title: string; forgotten: number }
@@ -39,6 +56,13 @@ function summarize(agent: string, text: string) {
       return { title: "実装が完成した", verify: o.how_to_verify as string, code: o.code as string };
     if (agent === "tester")
       return { title: o.summary as string, code: o.test_code as string };
+    if (agent === "security_reviewer")
+      return {
+        title: (o.summary as string) || "監査完了",
+        list: ((o.findings as SecurityFinding[]) ?? []).map(
+          (f) => `[${f.severity}] ${f.file_path}:${f.line} ${f.issue}`,
+        ),
+      };
   } catch {
     /* JSONでなければ生テキスト表示 */
   }
@@ -90,6 +114,22 @@ export default function Home() {
         return [
           ...filtered,
           { id: nextId(), kind: "output", agent: d.agent, role: d.role, text: d.text },
+        ];
+      });
+    });
+    on("security_start", () => push({ id: nextId(), kind: "securing" }));
+    on("security_result", (d) => {
+      setItems((prev) => {
+        const filtered = prev.filter((it) => it.kind !== "securing");
+        return [
+          ...filtered,
+          {
+            id: nextId(),
+            kind: "security",
+            passed: String(d.passed) === "true",
+            summary: d.summary ?? "",
+            findings: (d.findings as SecurityFinding[]) ?? [],
+          },
         ];
       });
     });
@@ -278,6 +318,69 @@ function renderItem(it: TimelineItem) {
             )}
           </div>
         </Card>
+      );
+    }
+    case "securing":
+      return (
+        <Card>
+          <div className="flex w-16 shrink-0 flex-col items-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-neutral-100 text-2xl ring-2 ring-rose-400 dark:bg-neutral-800">
+              🛡️
+            </div>
+            <span className="mt-1 text-[10px] text-neutral-500">かんさ</span>
+          </div>
+          <div className="flex items-center text-sm text-neutral-500">
+            けんじゃがコードのぜいじゃくせいを しらべている
+            <span className="ml-1 inline-flex animate-pulse">…</span>
+          </div>
+        </Card>
+      );
+    case "security": {
+      const badge = (sev: string) =>
+        sev === "critical"
+          ? "bg-red-600 text-white"
+          : sev === "important"
+            ? "bg-orange-500 text-white"
+            : "bg-neutral-400 text-white";
+      return (
+        <div
+          className={`rounded-xl px-4 py-3 text-sm ${
+            it.passed
+              ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
+              : "bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-200"
+          }`}
+        >
+          <div className="font-semibold">
+            {it.passed
+              ? `🛡️✅ セキュリティ監査：${it.summary || "問題なし"}`
+              : "🛡️⚠️ このコードに ぜいじゃくせいあり！"}
+          </div>
+          {!it.passed && it.summary && (
+            <p className="mt-0.5 text-xs opacity-80">{it.summary}</p>
+          )}
+          {it.findings.length > 0 && (
+            <ul className="mt-2 flex flex-col gap-1">
+              {it.findings.map((f, i) => (
+                <li key={i} className="flex items-start gap-2 text-xs">
+                  <span
+                    className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${badge(f.severity)}`}
+                  >
+                    {f.severity}
+                  </span>
+                  <span>
+                    <code className="opacity-70">
+                      {f.file_path}:{f.line}
+                    </code>{" "}
+                    {f.issue}
+                    {f.recommendation && (
+                      <span className="opacity-70">（推奨: {f.recommendation}）</span>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       );
     }
     case "verifying":
