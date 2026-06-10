@@ -165,6 +165,9 @@ const FONT = {
   color: "#ffffff",
 };
 
+// 実装が一瞬で終わるタスクでも「働いている感」が出る最低演出時間
+const MIN_WORK_MS = 2600;
+
 class HiveRpgScene extends Phaser.Scene {
   private queue: HiveEvent[] = [];
   private busy = false;
@@ -175,6 +178,10 @@ class HiveRpgScene extends Phaser.Scene {
   private messages: string[] = [];
   private messageText!: Phaser.GameObjects.Text;
   private centered: AgentName | null = null;
+  /** 各Agentが働き始めた時刻（最低演出時間の計算用） */
+  private startedAt = new Map<AgentName, number>();
+  /** handoff で受け取った「次は何をするか」をagent_startの台詞に使う */
+  private pendingDetail = new Map<AgentName, string>();
 
   constructor() {
     super("hive-rpg");
@@ -349,8 +356,15 @@ class HiveRpgScene extends Phaser.Scene {
       }
       case "agent_start": {
         if (!AGENTS.includes(agent)) return this.finish(0);
+        this.startedAt.set(agent, this.time.now);
         this.setStatus(agent, "しごとちゅう", "#fbbf24");
-        this.addMessage(`${LABEL[agent]}は かんがえている…`);
+        const detail = String(d.detail ?? "") || this.pendingDetail.get(agent) || "";
+        this.pendingDetail.delete(agent);
+        this.addMessage(
+          detail
+            ? `${LABEL[agent]}は 「${detail.slice(0, 28)}」に とりくんでいる…`
+            : `${LABEL[agent]}は かんがえている…`,
+        );
         return this.walkToCenter(agent, () => {
           this.setBubble(agent, "…");
           this.finish(300);
@@ -358,10 +372,53 @@ class HiveRpgScene extends Phaser.Scene {
       }
       case "agent_output": {
         if (!AGENTS.includes(agent)) return this.finish(0);
-        this.setBubble(agent, "！");
-        this.addMessage(`${LABEL[agent]}の しごとが おわった`);
-        this.setStatus(agent, "かんりょう", "#34d399");
-        return this.time.delayedCall(450, () => this.walkHome(agent, () => this.finish(150)));
+        // 一瞬で終わったタスクも MIN_WORK_MS は「働いている姿」を見せる
+        const started = this.startedAt.get(agent) ?? 0;
+        const wait = Math.max(0, MIN_WORK_MS - (this.time.now - started));
+        return this.time.delayedCall(wait, () => {
+          this.setBubble(agent, "！");
+          this.addMessage(`${LABEL[agent]}の しごとが おわった`);
+          this.setStatus(agent, "かんりょう", "#34d399");
+          // 直後に受け渡し(handoff)が控えている場合は、その場で待つ（行って戻りを防ぐ）
+          const next = this.queue[0];
+          if (next?.type === "handoff" && String(next.data.from_agent) === agent) {
+            return this.finish(350);
+          }
+          this.time.delayedCall(450, () => this.walkHome(agent, () => this.finish(150)));
+        });
+      }
+      case "handoff": {
+        const from = String(d.from_agent ?? "") as AgentName;
+        const to = String(d.to_agent ?? "") as AgentName;
+        if (!AGENTS.includes(from) || !AGENTS.includes(to)) return this.finish(0);
+        const item = String(d.item ?? "せいかぶつ");
+        const detail = String(d.detail ?? "");
+        if (detail) this.pendingDetail.set(to, detail);
+        // 2体が中央で向かい合い、会話してタスクを渡す（A2Aの可視化）
+        this.centered = null;
+        this.setBubble(from, "");
+        this.addMessage(`${LABEL[from]}「${item}が できたぞ！」`);
+        this.setStatus(from, "かんりょう", "#34d399");
+        this.moveChar(from, STAGE.x - 48, STAGE.y);
+        return this.moveChar(to, STAGE.x + 48, STAGE.y, () => {
+          this.setBubble(from, "💬");
+          this.setBubble(to, "…");
+          this.time.delayedCall(1000, () => {
+            this.addMessage(`${LABEL[to]}「まかせろ！」── ${item}を うけとった`);
+            this.setBubble(from, "");
+            this.setBubble(to, "！");
+            this.setStatus(to, "しごとちゅう", "#fbbf24");
+            this.startedAt.set(to, this.time.now);
+            this.moveChar(from, HOME[from].x, HOME[from].y);
+            this.time.delayedCall(350, () => {
+              this.centered = to;
+              this.moveChar(to, STAGE.x, STAGE.y, () => {
+                this.setBubble(to, "…");
+                this.finish(250);
+              });
+            });
+          });
+        });
       }
       case "security_start":
         this.setStatus("security_reviewer", "かんさちゅう", "#fb7185");

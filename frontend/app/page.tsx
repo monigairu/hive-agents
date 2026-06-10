@@ -33,6 +33,7 @@ type TimelineItem =
   | { id: number; kind: "recall"; lessons: string[] }
   | { id: number; kind: "thinking"; agent: string; role: string }
   | { id: number; kind: "output"; agent: string; role: string; text: string }
+  | { id: number; kind: "handoff"; from: string; to: string; item: string; detail: string }
   | { id: number; kind: "verifying" }
   | { id: number; kind: "verify"; passed: boolean; output: string }
   | { id: number; kind: "securing" }
@@ -123,6 +124,16 @@ export default function Home() {
         ];
       });
     });
+    on("handoff", (d) =>
+      push({
+        id: nextId(),
+        kind: "handoff",
+        from: d.from_agent,
+        to: d.to_agent,
+        item: d.item ?? "",
+        detail: d.detail ?? "",
+      }),
+    );
     on("security_start", () => push({ id: nextId(), kind: "securing" }));
     on("security_result", (d) => {
       setItems((prev) => {
@@ -336,6 +347,13 @@ function renderItem(it: TimelineItem) {
         </Card>
       );
     }
+    case "handoff":
+      return (
+        <div className="text-center text-xs text-neutral-500">
+          🤝 <b>{labelOf(it.from)}</b> が <b>{labelOf(it.to)}</b> に {it.item}を渡した
+          {it.detail && <span className="ml-1 opacity-70">（{it.detail.slice(0, 40)}）</span>}
+        </div>
+      );
     case "securing":
       return (
         <Card>

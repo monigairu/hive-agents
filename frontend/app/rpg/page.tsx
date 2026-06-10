@@ -15,6 +15,7 @@ const EVENTS = [
   "memory_recall",
   "agent_start",
   "agent_output",
+  "handoff",
   "security_start",
   "security_result",
   "verify_start",
@@ -25,12 +26,46 @@ const EVENTS = [
   "done",
 ];
 
+/** 完了時に表示する成果物（各Agentの最終出力JSONから組み立てる）。 */
+type Artifact = {
+  overview: string;
+  endpoints: string[];
+  code: string;
+  howToVerify: string;
+  testSummary: string;
+  testCode: string;
+};
+
+function buildArtifact(outputs: Record<string, string>): Artifact | null {
+  const parse = (agent: string): Record<string, unknown> => {
+    try {
+      return JSON.parse(outputs[agent] ?? "");
+    } catch {
+      return {};
+    }
+  };
+  const design = parse("designer");
+  const impl = parse("implementer");
+  const test = parse("tester");
+  if (!impl.code) return null;
+  return {
+    overview: String(design.overview ?? ""),
+    endpoints: (design.endpoints as string[]) ?? [],
+    code: String(impl.code ?? ""),
+    howToVerify: String(impl.how_to_verify ?? ""),
+    testSummary: String(test.summary ?? ""),
+    testCode: String(test.test_code ?? ""),
+  };
+}
+
 export default function RpgPage() {
   const [task, setTask] = useState("タスク管理のCRUD APIをFastAPIで作って");
   const [running, setRunning] = useState(false);
+  const [artifact, setArtifact] = useState<Artifact | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const gameRef = useRef<HiveGame | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  const outputsRef = useRef<Record<string, string>>({});
 
   // Phaser はブラウザ専用のため、マウント後に動的importで初期化する
   useEffect(() => {
@@ -53,6 +88,8 @@ export default function RpgPage() {
     if (running || !task.trim()) return;
     esRef.current?.close();
     setRunning(true);
+    setArtifact(null);
+    outputsRef.current = {};
 
     const es = new EventSource(`${API}/stream?task=${encodeURIComponent(task)}`);
     esRef.current = es;
@@ -60,8 +97,13 @@ export default function RpgPage() {
     for (const name of EVENTS) {
       es.addEventListener(name, (e) => {
         const raw = (e as MessageEvent).data;
-        gameRef.current?.enqueue({ type: name, data: raw ? JSON.parse(raw) : {} });
+        const data = raw ? JSON.parse(raw) : {};
+        gameRef.current?.enqueue({ type: name, data });
+        if (name === "agent_output") {
+          outputsRef.current[String(data.agent)] = String(data.text ?? "");
+        }
         if (name === "done") {
+          setArtifact(buildArtifact(outputsRef.current));
           setRunning(false);
           es.close(); // SSEの自動再接続を止める（重要）
         }
@@ -115,6 +157,68 @@ export default function RpgPage() {
         ref={containerRef}
         className="overflow-hidden rounded-xl border border-neutral-800 bg-black"
       />
+
+      {artifact && (
+        <section className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4 text-sm dark:bg-amber-950/30">
+          <h2 className="text-base font-bold text-amber-900 dark:text-amber-200">
+            🏆 ほうしゅう（できあがった成果物）
+          </h2>
+          {artifact.overview && (
+            <p className="mt-2 text-neutral-800 dark:text-neutral-200">{artifact.overview}</p>
+          )}
+          {artifact.endpoints.length > 0 && (
+            <div className="mt-3">
+              <div className="font-semibold text-neutral-700 dark:text-neutral-300">
+                つかえるAPI（エンドポイント）
+              </div>
+              <ul className="mt-1 list-disc pl-5 text-neutral-600 dark:text-neutral-400">
+                {artifact.endpoints.map((ep, i) => (
+                  <li key={i}>
+                    <code className="text-xs">{ep}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {artifact.howToVerify && (
+            <div className="mt-3">
+              <div className="font-semibold text-neutral-700 dark:text-neutral-300">
+                ✅ 自分のPCで動かして確認する方法
+              </div>
+              <pre className="mt-1 overflow-auto whitespace-pre-wrap rounded-lg bg-neutral-950 p-3 text-[11px] leading-relaxed text-neutral-100">
+                {artifact.howToVerify}
+              </pre>
+            </div>
+          )}
+          {artifact.testSummary && (
+            <p className="mt-3 text-xs text-neutral-600 dark:text-neutral-400">
+              🧪 テスト：{artifact.testSummary}（サンドボックスで実際に動くことを確認済み）
+            </p>
+          )}
+          <div className="mt-3 flex flex-col gap-2">
+            {artifact.code && (
+              <details>
+                <summary className="cursor-pointer text-xs font-semibold text-amber-700">
+                  📜 生成されたコードを見る（main.py）
+                </summary>
+                <pre className="mt-1 max-h-80 overflow-auto rounded-lg bg-neutral-950 p-3 text-[11px] leading-relaxed text-neutral-100">
+                  {artifact.code}
+                </pre>
+              </details>
+            )}
+            {artifact.testCode && (
+              <details>
+                <summary className="cursor-pointer text-xs font-semibold text-amber-700">
+                  🧪 テストコードを見る（test_main.py）
+                </summary>
+                <pre className="mt-1 max-h-80 overflow-auto rounded-lg bg-neutral-950 p-3 text-[11px] leading-relaxed text-neutral-100">
+                  {artifact.testCode}
+                </pre>
+              </details>
+            )}
+          </div>
+        </section>
+      )}
     </main>
   );
 }

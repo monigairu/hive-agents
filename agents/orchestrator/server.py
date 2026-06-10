@@ -76,6 +76,14 @@ def _sse(event_type: str, **payload) -> dict:
     return {"event": event_type, "data": json.dumps(payload, ensure_ascii=False)}
 
 
+# APIゴールデンパスの実行順（F-02）。handoff イベントの生成に使う。
+_PIPELINE = ["designer", "implementer", "tester"]
+# 受け渡すもの（item）と、受け手に伝える内容を抜き出すフィールド
+_HANDOFF_ITEM = {
+    "designer": ("せっけいしょ", "overview"),
+    "implementer": ("かんせいコード", "how_to_verify"),
+}
+
 MAX_ATTEMPTS = int(os.environ.get("HIVE_MAX_ATTEMPTS", "3"))
 # デモ/テスト用：最初の N 回の検証を強制的に失敗扱いにし、修正ループを観察できる。
 _DEMO_FAIL = int(os.environ.get("HIVE_DEMO_FAIL_ATTEMPTS", "0"))
@@ -115,6 +123,23 @@ async def _verify(code: str, test_code: str, attempt: int) -> VerificationResult
         if span:
             span.set_attribute("verify.passed", result.passed)
     return result
+
+
+def _handoff_events(author: str, text: str) -> list[dict]:
+    """author の成果が出た瞬間に「次の担当への受け渡し」を表すイベント列を作る。
+
+    タスクが渡った瞬間に次Agentの agent_start を流すことで、
+    UIは実際のLLM待ち時間を「考えている」演出として見せられる（F-14）。
+    """
+    if author not in _HANDOFF_ITEM:
+        return []
+    nxt = _PIPELINE[_PIPELINE.index(author) + 1]
+    item, key = _HANDOFF_ITEM[author]
+    detail = _field(text, key)[:80]
+    return [
+        _sse("handoff", from_agent=author, to_agent=nxt, item=item, detail=detail),
+        _sse("agent_start", agent=nxt, role=AGENT_ROLE.get(nxt, ""), detail=detail),
+    ]
 
 
 def _numbered(code: str) -> str:
@@ -168,7 +193,10 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
         runner = InMemoryRunner(agent=build_workflow(), app_name=APP_NAME)
         session = await runner.session_service.create_session(app_name=APP_NAME, user_id="ui")
         message = types.Content(role="user", parts=[types.Part(text=base_prompt)])
-        last_author: str | None = None
+        # 最初の担当には今この瞬間にタスクが渡る。以降は handoff が次の開始を知らせる
+        yield _sse(
+            "agent_start", agent="designer", role=AGENT_ROLE["designer"], detail=task[:60]
+        )
         with agent_span("hive.workflow", operation="invoke_agent", **decision):
             async for event in runner.run_async(
                 user_id="ui", session_id=session.id, new_message=message
@@ -180,10 +208,9 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                 if not author or not text:
                     continue
                 outputs[author] = text
-                if author != last_author:
-                    yield _sse("agent_start", agent=author, role=AGENT_ROLE.get(author, ""))
-                    last_author = author
                 yield _sse("agent_output", agent=author, role=AGENT_ROLE.get(author, ""), text=text)
+                for handoff_ev in _handoff_events(author, text):
+                    yield handoff_ev
 
         design = outputs.get("designer", "")
 
@@ -209,7 +236,14 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                 yield ev
             if impl_out.get("text"):
                 outputs["implementer"] = impl_out["text"]
-            # 新しい実装に合わせてテストも作り直す
+            # 新しい実装に合わせてテストも作り直す（受け渡しも可視化する）
+            yield _sse(
+                "handoff",
+                from_agent="implementer",
+                to_agent="tester",
+                item="しゅうせいした コード",
+                detail=_field(outputs.get("implementer"), "how_to_verify")[:80],
+            )
             test_out: dict = {}
             async for ev in _invoke(tester_agent, outputs["implementer"], test_out):
                 yield ev
