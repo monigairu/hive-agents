@@ -5,13 +5,18 @@ import { useRef, useState } from "react";
 // Orchestrator(SSE) のエンドポイント。デプロイ時は NEXT_PUBLIC_HIVE_API で差し替え。
 const API = process.env.NEXT_PUBLIC_HIVE_API ?? "http://localhost:8000";
 
-// 役割をドラクエ職業に対応（要件 F-14 の伏線：M7でドット絵キャラに昇格）
-const JOB: Record<string, { emoji: string; job: string; ring: string }> = {
-  designer: { emoji: "🧙", job: "まほうつかい", ring: "ring-violet-400" },
-  implementer: { emoji: "⚔️", job: "せんし", ring: "ring-amber-400" },
-  tester: { emoji: "⛪", job: "そうりょ", ring: "ring-sky-400" },
-  security_reviewer: { emoji: "🛡️", job: "けんじゃ", ring: "ring-rose-400" },
+// Agentの表示定義（要件 F-14：M7でドット絵キャラに昇格）
+// ドラクエ風は絵文字・口調・演出で出し、表示名は「何をしている係か」が
+// 一般の人にも一目でわかる役割名を主表示にする（職業名は使わない）。
+const JOB: Record<string, { emoji: string; label: string; ring: string }> = {
+  designer: { emoji: "🧙", label: "設計担当", ring: "ring-violet-400" },
+  implementer: { emoji: "⚔️", label: "実装担当", ring: "ring-amber-400" },
+  tester: { emoji: "⛪", label: "テスト担当", ring: "ring-sky-400" },
+  security_reviewer: { emoji: "🛡️", label: "セキュリティ監査", ring: "ring-rose-400" },
 };
+
+/** Agent内部名 → 役割がわかる表示名。 */
+const labelOf = (agent: string) => JOB[agent]?.label ?? agent;
 
 type SecurityFinding = {
   severity: string;
@@ -224,7 +229,7 @@ export default function Home() {
 }
 
 function Avatar({ agent, role }: { agent: string; role: string }) {
-  const j = JOB[agent] ?? { emoji: "🐝", job: role, ring: "ring-neutral-300" };
+  const j = JOB[agent] ?? { emoji: "🐝", label: role || agent, ring: "ring-neutral-300" };
   return (
     <div className="flex w-16 shrink-0 flex-col items-center">
       <div
@@ -232,7 +237,9 @@ function Avatar({ agent, role }: { agent: string; role: string }) {
       >
         {j.emoji}
       </div>
-      <span className="mt-1 text-[10px] text-neutral-500">{j.job}</span>
+      <span className="mt-1 text-center text-[10px] leading-tight text-neutral-500">
+        {j.label}
+      </span>
     </div>
   );
 }
@@ -276,7 +283,7 @@ function renderItem(it: TimelineItem) {
           <Avatar agent={it.agent} role={it.role} />
           <div className="flex items-center text-sm text-neutral-500">
             <span className="font-medium text-neutral-700 dark:text-neutral-300">
-              {it.agent}
+              {labelOf(it.agent)}
             </span>
             は かんがえている
             <span className="ml-1 inline-flex animate-pulse">…</span>
@@ -289,7 +296,10 @@ function renderItem(it: TimelineItem) {
         <Card>
           <Avatar agent={it.agent} role={it.role} />
           <div className="min-w-0 flex-1 text-sm">
-            <div className="font-semibold">{it.agent}</div>
+            <div className="font-semibold">
+              {labelOf(it.agent)}
+              <span className="ml-1.5 text-xs font-normal text-neutral-400">{it.agent}</span>
+            </div>
             {s.title && <p className="mt-0.5 text-neutral-700 dark:text-neutral-300">{s.title}</p>}
             {"list" in s && s.list && (
               <ul className="mt-1 list-disc pl-5 text-neutral-600 dark:text-neutral-400">
@@ -327,10 +337,12 @@ function renderItem(it: TimelineItem) {
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-neutral-100 text-2xl ring-2 ring-rose-400 dark:bg-neutral-800">
               🛡️
             </div>
-            <span className="mt-1 text-[10px] text-neutral-500">かんさ</span>
+            <span className="mt-1 text-center text-[10px] leading-tight text-neutral-500">
+              セキュリティ監査
+            </span>
           </div>
           <div className="flex items-center text-sm text-neutral-500">
-            けんじゃがコードのぜいじゃくせいを しらべている
+            セキュリティ監査が コードの ぜいじゃくせいを しらべている
             <span className="ml-1 inline-flex animate-pulse">…</span>
           </div>
         </Card>
@@ -432,7 +444,7 @@ function renderItem(it: TimelineItem) {
         <div className="rounded-xl bg-fuchsia-50 px-4 py-3 text-sm text-fuchsia-900 dark:bg-fuchsia-950/40 dark:text-fuchsia-200">
           <div className="font-semibold">⚔️→🔮 しょうかんかいじょ！ あたらしい仲間がくわわった</div>
           <p className="mt-0.5 text-xs text-fuchsia-700 dark:text-fuchsia-300">
-            {it.agent} を上位モデル（{it.toModel}）に格上げして再挑戦
+            {labelOf(it.agent)}を上位モデル（{it.toModel}）に交代して再挑戦
           </p>
         </div>
       );
