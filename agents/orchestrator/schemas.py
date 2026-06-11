@@ -80,6 +80,24 @@ class WebImplementationResult(BaseModel):
     )
 
 
+class AppDesignSpec(BaseModel):
+    """フルスタックdesigner の成果物：API＋画面の設計仕様（M8・appパイプライン）。"""
+
+    overview: str = Field(description="何のアプリか・誰が使うか")
+    endpoints: list[str] = Field(
+        default_factory=list,
+        description="APIエンドポイントの一覧（例: 'POST /expenses 収支の登録'）",
+    )
+    screens: list[str] = Field(
+        default_factory=list,
+        description="画面の構成（例: '一覧画面：収支をテーブル表示・追加フォーム付き'）",
+    )
+    style_direction: str = Field(
+        default="", description="画面の性格と配色・書体の方向性（web-designスキルの3役）"
+    )
+    notes: str = Field(default="", description="設計上の補足・前提")
+
+
 class SecurityFindingItem(BaseModel):
     """security-reviewer の指摘1件（要件 F-15）。ファイルパス・行番号は必須。"""
 

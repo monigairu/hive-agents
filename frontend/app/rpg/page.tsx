@@ -28,7 +28,7 @@ const EVENTS = [
 
 /** 完了時に表示する成果物（各Agentの最終出力JSONから組み立てる）。 */
 type Artifact = {
-  kind: "api" | "web";
+  kind: "api" | "web" | "app";
   overview: string;
   endpoints: string[];
   code: string;
@@ -49,18 +49,20 @@ function buildArtifact(outputs: Record<string, string>): Artifact | null {
   };
   const design = parse("designer");
   const impl = parse("implementer");
+  const fe = parse("frontend");
   const test = parse("tester");
   if (!impl.code && !impl.html) return null;
+  const kind: Artifact["kind"] = impl.html ? "web" : fe.html ? "app" : "api";
   return {
-    kind: impl.html ? "web" : "api",
+    kind,
     overview: String(design.overview ?? ""),
     endpoints: (design.endpoints as string[]) ?? [],
     code: String(impl.code ?? ""),
-    howToVerify: String(impl.how_to_verify ?? ""),
+    howToVerify: String((kind === "app" ? fe.how_to_verify : impl.how_to_verify) ?? ""),
     testSummary: String(test.summary ?? ""),
     testCode: String(test.test_code ?? ""),
-    html: String(impl.html ?? ""),
-    designNotes: String(impl.design_notes ?? ""),
+    html: String((impl.html || fe.html) ?? ""),
+    designNotes: String((impl.design_notes || fe.design_notes) ?? ""),
   };
 }
 
@@ -71,12 +73,12 @@ function openHtml(html: string) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-/** 生成ページを index.html としてダウンロードする。 */
-function downloadHtml(html: string) {
-  const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+/** テキストをファイルとしてダウンロードする。 */
+function downloadFile(filename: string, content: string) {
+  const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
   const a = document.createElement("a");
   a.href = url;
-  a.download = "index.html";
+  a.download = filename;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
@@ -189,7 +191,7 @@ export default function RpgPage() {
           {artifact.overview && (
             <p className="mt-2 text-neutral-800 dark:text-neutral-200">{artifact.overview}</p>
           )}
-          {artifact.kind === "web" && (
+          {artifact.html && (
             <div className="mt-3 flex flex-col gap-2">
               {artifact.designNotes && (
                 <p className="text-xs text-neutral-600 dark:text-neutral-400">
@@ -199,10 +201,15 @@ export default function RpgPage() {
               <iframe
                 srcDoc={artifact.html}
                 sandbox=""
-                title="できあがったページのプレビュー"
+                title="できあがった画面のプレビュー"
                 className="h-[420px] w-full rounded-lg border border-neutral-300 bg-white"
               />
-              <div className="flex gap-2">
+              {artifact.kind === "app" && (
+                <p className="text-[11px] text-neutral-500">
+                  ※プレビューはAPI未起動のため空（またはエラー表示）の状態です。下の「確認する方法」の手順でAPIを起動すると実際に動きます
+                </p>
+              )}
+              <div className="flex flex-wrap gap-2">
                 <button
                   onClick={() => openHtml(artifact.html)}
                   className="rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-600"
@@ -210,11 +217,19 @@ export default function RpgPage() {
                   🔍 べつタブで ひらく
                 </button>
                 <button
-                  onClick={() => downloadHtml(artifact.html)}
+                  onClick={() => downloadFile("index.html", artifact.html)}
                   className="rounded-lg border border-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100"
                 >
                   💾 index.html を ダウンロード
                 </button>
+                {artifact.kind === "app" && artifact.code && (
+                  <button
+                    onClick={() => downloadFile("main.py", artifact.code)}
+                    className="rounded-lg border border-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100"
+                  >
+                    💾 main.py（API）を ダウンロード
+                  </button>
+                )}
               </div>
               <details>
                 <summary className="cursor-pointer text-xs font-semibold text-amber-700">

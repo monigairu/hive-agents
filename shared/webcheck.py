@@ -106,3 +106,40 @@ def check_web(html: str) -> VerificationResult:
     return VerificationResult(
         passed=True, returncode=0, output=f"ページ検証OK（本文{scan.text_len}文字・id {len(scan.ids)}個）"
     )
+
+
+_PATH_RE = re.compile(r"/[A-Za-z0-9_\-{}/]+")
+
+
+def check_frontend(html: str, endpoints: list[str]) -> VerificationResult:
+    """フルスタックの画面(index.html)を検証する（appパイプライン・M8）。
+
+    check_web の全チェックに加えて、
+    - 契約チェック：実装済みAPIのエンドポイント（契約）のパスを参照しているか
+      （F-03「前段出力＝契約」。画面がAPIを呼んでいなければアプリとして成立しない）
+    """
+    base = check_web(html)
+    problems = []
+    paths = [m.group(0) for ep in endpoints for m in [_PATH_RE.search(ep)] if m]
+    # "/expenses/{id}" → "/expenses" のように、パスパラメータ前の固定部分で照合する
+    prefixes = [p for p in (path.split("{")[0].rstrip("/") for path in paths) if p]
+    if prefixes and not any(prefix in html for prefix in prefixes):
+        problems.append(
+            "契約違反: 実装済みAPIのエンドポイント（"
+            + ", ".join(paths[:5])
+            + "）がHTML内で参照されていない。fetch で契約どおりのパスを呼ぶこと"
+        )
+    if not base.passed:
+        return VerificationResult(
+            passed=False,
+            returncode=1,
+            output=base.output + ("\n- " + "\n- ".join(problems) if problems else ""),
+        )
+    if problems:
+        return VerificationResult(
+            passed=False, returncode=1,
+            output="画面検証で以下の問題を検出:\n" + "\n".join(f"- {p}" for p in problems),
+        )
+    return VerificationResult(
+        passed=True, returncode=0, output=base.output + "・API契約の参照OK"
+    )

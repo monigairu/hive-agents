@@ -12,6 +12,7 @@ const API = process.env.NEXT_PUBLIC_HIVE_API ?? "http://localhost:8000";
 const JOB: Record<string, { emoji: string; label: string; ring: string }> = {
   designer: { emoji: "🧙", label: "設計担当", ring: "ring-violet-400" },
   implementer: { emoji: "⚔️", label: "実装担当", ring: "ring-amber-400" },
+  frontend: { emoji: "🎨", label: "画面担当", ring: "ring-teal-400" },
   tester: { emoji: "⛪", label: "テスト担当", ring: "ring-sky-400" },
   security_reviewer: { emoji: "🛡️", label: "セキュリティ監査", ring: "ring-rose-400" },
 };
@@ -29,7 +30,7 @@ type SecurityFinding = {
 
 type TimelineItem =
   | { id: number; kind: "task"; task: string }
-  | { id: number; kind: "router"; taskType: string; scale: string }
+  | { id: number; kind: "router"; taskType: string; scale: string; party: string[] }
   | { id: number; kind: "recall"; lessons: string[] }
   | { id: number; kind: "thinking"; agent: string; role: string }
   | { id: number; kind: "output"; agent: string; role: string; text: string }
@@ -67,6 +68,12 @@ function summarize(agent: string, text: string) {
         title: o.html ? "Webページが完成した" : "実装が完成した",
         verify: o.how_to_verify as string,
         code: (o.code ?? o.html) as string,
+      };
+    if (agent === "frontend")
+      return {
+        title: "画面が完成した",
+        verify: o.how_to_verify as string,
+        code: o.html as string,
       };
     if (agent === "tester")
       return { title: o.summary as string, code: o.test_code as string };
@@ -111,7 +118,13 @@ export default function Home() {
 
     on("task_received", (d) => push({ id: nextId(), kind: "task", task: d.task }));
     on("router", (d) =>
-      push({ id: nextId(), kind: "router", taskType: d.task_type, scale: d.scale }),
+      push({
+        id: nextId(),
+        kind: "router",
+        taskType: d.task_type,
+        scale: d.scale,
+        party: ((d.party as { agent: string }[]) ?? []).map((p) => labelOf(p.agent)),
+      }),
     );
     on("memory_recall", (d) =>
       push({ id: nextId(), kind: "recall", lessons: d.lessons ?? [] }),
@@ -291,6 +304,9 @@ function renderItem(it: TimelineItem) {
       return (
         <div className="text-center text-xs text-neutral-500">
           ⚙️ ルーター判定：種別 <b>{it.taskType}</b> / 規模 <b>{it.scale}</b> → はたらきバチを編成
+          {it.party.length > 0 && (
+            <span className="ml-1">（{it.party.join("・")}）</span>
+          )}
         </div>
       );
     case "recall":

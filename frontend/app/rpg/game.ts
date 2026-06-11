@@ -21,24 +21,18 @@ export type HiveGame = {
 const W = 760;
 const H = 540;
 
-const AGENTS = ["designer", "implementer", "tester", "security_reviewer"] as const;
-type AgentName = (typeof AGENTS)[number];
-
-const LABEL: Record<AgentName, string> = {
+// 既知のAgentの表示名カタログ。実際の編成（パーティ）は router イベントが運んでくる
+// （F-02 動的エージェント組成：タスクによって働くAgentが変わる）
+const LABEL: Record<string, string> = {
   designer: "設計担当",
   implementer: "実装担当",
+  frontend: "画面担当",
   tester: "テスト担当",
   security_reviewer: "セキュリティ監査",
 };
 
-// 持ち場（画面下段）と中央ステージ
-const HOME: Record<AgentName, { x: number; y: number }> = {
-  designer: { x: 120, y: 330 },
-  implementer: { x: 290, y: 330 },
-  tester: { x: 460, y: 330 },
-  security_reviewer: { x: 630, y: 330 },
-};
 const STAGE = { x: 380, y: 210 };
+const HOME_Y = 330;
 
 // --- ドット絵定義（12x14・'.'は透過） -------------------------------------
 // A=帽子/頭, S=肌, E=目, B=胴, L=脚, F=足, X=アクセント
@@ -135,6 +129,52 @@ const SPRITES: Record<string, { rows: string[]; palette: Record<string, string> 
       X: "#facc15", L: "#374151", F: "#1f2937",
     },
   },
+  frontend: {
+    // ベレー帽と筆（画面職人風）
+    rows: [
+      "..AAAAAAA...",
+      ".AAAAAAAAA..",
+      "..AAAAAA....",
+      "...SSSSSS...",
+      "...SESSES...",
+      "...SSSSSS...",
+      "..BBBBBBBB..",
+      ".BBBBBBBBXX.",
+      ".BBXBBBBBXX.",
+      ".BBBBBBBBBB.",
+      "..BBBBBBBB..",
+      "...LL..LL...",
+      "...LL..LL...",
+      "...FF..FF...",
+    ],
+    palette: {
+      A: "#0d9488", S: "#fcd7b0", E: "#1f2937", B: "#2dd4bf",
+      X: "#f59e0b", L: "#374151", F: "#1f2937",
+    },
+  },
+  // F-13 交代後の画面担当（上位モデル）：金のベレー
+  frontend_pro: {
+    rows: [
+      "..AAAAAAA...",
+      ".AAAAAAAAA..",
+      "..AAAAAA....",
+      "...SSSSSS...",
+      "...SESSES...",
+      "...SSSSSS...",
+      "..BBBBBBBB..",
+      ".BBBBBBBBXX.",
+      ".BBXBBBBBXX.",
+      ".BBBBBBBBBB.",
+      "..BBBBBBBB..",
+      "...LL..LL...",
+      "...LL..LL...",
+      "...FF..FF...",
+    ],
+    palette: {
+      A: "#fbbf24", S: "#fcd7b0", E: "#1f2937", B: "#a855f7",
+      X: "#fde68a", L: "#374151", F: "#1f2937",
+    },
+  },
   // F-13 交代後の実装担当（上位モデル）：金色の鎧
   implementer_pro: {
     rows: [
@@ -172,16 +212,20 @@ class HiveRpgScene extends Phaser.Scene {
   private queue: HiveEvent[] = [];
   private busy = false;
 
-  private chars = new Map<AgentName, Phaser.GameObjects.Image>();
-  private bubbles = new Map<AgentName, Phaser.GameObjects.Text>();
-  private statusText = new Map<AgentName, Phaser.GameObjects.Text>();
+  private chars = new Map<string, Phaser.GameObjects.Image>();
+  private bubbles = new Map<string, Phaser.GameObjects.Text>();
+  private statusText = new Map<string, Phaser.GameObjects.Text>();
+  /** 持ち場（編成人数に応じて spawnParty が計算する） */
+  private homes = new Map<string, { x: number; y: number }>();
+  /** 編成ごとに作り直すUI（ステータス窓など） */
+  private partyUi: Phaser.GameObjects.GameObject[] = [];
   private messages: string[] = [];
   private messageText!: Phaser.GameObjects.Text;
-  private centered: AgentName | null = null;
+  private centered: string | null = null;
   /** 各Agentが働き始めた時刻（最低演出時間の計算用） */
-  private startedAt = new Map<AgentName, number>();
+  private startedAt = new Map<string, number>();
   /** handoff で受け取った「次は何をするか」をagent_startの台詞に使う */
-  private pendingDetail = new Map<AgentName, string>();
+  private pendingDetail = new Map<string, string>();
 
   constructor() {
     super("hive-rpg");
@@ -197,18 +241,55 @@ class HiveRpgScene extends Phaser.Scene {
       this.makeTexture(key, def.rows, def.palette);
     }
     this.drawGround();
-    this.drawStatusWindows();
     this.drawMessageWindow();
-    for (const name of AGENTS) {
-      const img = this.add.image(HOME[name].x, HOME[name].y, name).setScale(4);
-      img.setOrigin(0.5, 1);
-      this.chars.set(name, img);
+    this.addMessage("クエストを 発注すると オーケストレーターが はたらきバチを へんせいする…");
+  }
+
+  /** router の編成結果に従ってパーティを出現させる（F-02 動的エージェント組成）。 */
+  private spawnParty(party: { agent: string; role: string }[]) {
+    // 前回の編成を片付ける
+    for (const obj of this.partyUi) obj.destroy();
+    this.partyUi = [];
+    this.chars.forEach((c) => c.destroy());
+    this.bubbles.forEach((b) => b.destroy());
+    this.chars.clear();
+    this.bubbles.clear();
+    this.statusText.clear();
+    this.homes.clear();
+    this.centered = null;
+
+    const n = party.length;
+    const winW = Math.min(180, Math.floor((W - 16) / n) - 6);
+    party.forEach(({ agent, role }, i) => {
+      // ステータス窓（なまえ・じょうたい）
+      const x = 8 + i * (winW + 6);
+      this.partyUi.push(this.drawWindow(x, 8, winW, 58));
+      const name = this.add
+        .text(x + 10, 16, LABEL[agent] ?? role ?? agent, { ...FONT, fontSize: "12px" })
+        .setResolution(2);
+      const st = this.add
+        .text(x + 10, 38, "じょうたい：まち", { ...FONT, fontSize: "11px", color: "#9ca3af" })
+        .setResolution(2);
+      this.partyUi.push(name, st);
+      this.statusText.set(agent, st);
+      // キャラ（編成人数で持ち場を等間隔に割り付け、上から降ってきて参加）
+      const hx = Math.round((W / (n + 1)) * (i + 1));
+      this.homes.set(agent, { x: hx, y: HOME_Y });
+      const texKey = this.textures.exists(agent) ? agent : "implementer";
+      const img = this.add.image(hx, HOME_Y - 40, texKey).setScale(4).setOrigin(0.5, 1);
+      this.chars.set(agent, img);
       const bubble = this.add
-        .text(HOME[name].x, HOME[name].y - 64, "", { ...FONT, fontSize: "18px" })
+        .text(hx, HOME_Y - 64, "", { ...FONT, fontSize: "18px" })
         .setOrigin(0.5, 1);
-      this.bubbles.set(name, bubble);
-    }
-    this.addMessage("はたらきバチたちは クエストを まっている…");
+      this.bubbles.set(agent, bubble);
+      this.tweens.add({
+        targets: img,
+        y: HOME_Y,
+        duration: 320,
+        ease: "Bounce.easeOut",
+        delay: i * 110,
+      });
+    });
   }
 
   update() {
@@ -257,18 +338,6 @@ class HiveRpgScene extends Phaser.Scene {
     }
   }
 
-  private drawStatusWindows() {
-    AGENTS.forEach((name, i) => {
-      const x = 8 + i * 187;
-      this.drawWindow(x, 8, 180, 58);
-      this.add.text(x + 12, 16, LABEL[name], { ...FONT, fontSize: "13px" }).setResolution(2);
-      const st = this.add
-        .text(x + 12, 38, "じょうたい：まち", { ...FONT, fontSize: "12px", color: "#9ca3af" })
-        .setResolution(2);
-      this.statusText.set(name, st);
-    });
-  }
-
   private drawMessageWindow() {
     this.drawWindow(8, H - 110, W - 16, 102);
     this.messageText = this.add
@@ -282,15 +351,15 @@ class HiveRpgScene extends Phaser.Scene {
     this.messageText.setText(this.messages.join("\n"));
   }
 
-  private setStatus(name: AgentName, state: string, color = "#ffffff") {
+  private setStatus(name: string, state: string, color = "#ffffff") {
     this.statusText.get(name)?.setText(`じょうたい：${state}`).setColor(color);
   }
 
-  private setBubble(name: AgentName, text: string) {
+  private setBubble(name: string, text: string) {
     this.bubbles.get(name)?.setText(text);
   }
 
-  private moveChar(name: AgentName, x: number, y: number, onDone?: () => void) {
+  private moveChar(name: string, x: number, y: number, onDone?: () => void) {
     const img = this.chars.get(name);
     const bubble = this.bubbles.get(name);
     if (!img) return onDone?.();
@@ -308,7 +377,7 @@ class HiveRpgScene extends Phaser.Scene {
   }
 
   /** 中央ステージへ。既に中央にいる場合は何もしない（監査の二重イベント対策）。 */
-  private walkToCenter(name: AgentName, onDone: () => void) {
+  private walkToCenter(name: string, onDone: () => void) {
     if (this.centered === name) return onDone();
     const goCenter = () => {
       this.centered = name;
@@ -317,18 +386,22 @@ class HiveRpgScene extends Phaser.Scene {
     // 別のキャラが中央に居たら先に持ち場へ帰す
     if (this.centered && this.centered !== name) {
       const prev = this.centered;
+      const home = this.homes.get(prev);
       this.centered = null;
       this.setBubble(prev, "");
-      this.moveChar(prev, HOME[prev].x, HOME[prev].y, goCenter);
+      if (home) this.moveChar(prev, home.x, home.y, goCenter);
+      else goCenter();
     } else {
       goCenter();
     }
   }
 
-  private walkHome(name: AgentName, onDone?: () => void) {
+  private walkHome(name: string, onDone?: () => void) {
     if (this.centered === name) this.centered = null;
     this.setBubble(name, "");
-    this.moveChar(name, HOME[name].x, HOME[name].y, onDone);
+    const home = this.homes.get(name);
+    if (!home) return onDone?.();
+    this.moveChar(name, home.x, home.y, onDone);
   }
 
   private finish(delay = 250) {
@@ -341,29 +414,36 @@ class HiveRpgScene extends Phaser.Scene {
 
   private handle(e: HiveEvent) {
     const d = e.data;
-    const agent = String(d.agent ?? "") as AgentName;
+    const agent = String(d.agent ?? "");
     switch (e.type) {
       case "task_received":
         this.addMessage(`クエスト：${String(d.task ?? "").slice(0, 40)}`);
         return this.finish(900);
-      case "router":
-        this.addMessage(`はたらきバチを へんせいした（${String(d.task_type ?? "")}・${String(d.scale ?? "")}）`);
-        return this.finish(700);
+      case "router": {
+        const party = (d.party as { agent: string; role: string }[]) ?? [];
+        if (party.length > 0) this.spawnParty(party);
+        const names = party.map((p) => LABEL[p.agent] ?? p.agent).join("・");
+        this.addMessage(
+          `オーケストレーターが はたらきバチを へんせいした！（${String(d.task_type ?? "")}）`,
+        );
+        if (names) this.addMessage(`なかま：${names}`);
+        return this.finish(1100);
+      }
       case "memory_recall": {
         const lessons = (d.lessons as string[]) ?? [];
         this.addMessage(`むかしの きおくを おもいだした：${(lessons[0] ?? "").slice(0, 30)}`);
         return this.finish(800);
       }
       case "agent_start": {
-        if (!AGENTS.includes(agent)) return this.finish(0);
+        if (!this.chars.has(agent)) return this.finish(0);
         this.startedAt.set(agent, this.time.now);
         this.setStatus(agent, "しごとちゅう", "#fbbf24");
         const detail = String(d.detail ?? "") || this.pendingDetail.get(agent) || "";
         this.pendingDetail.delete(agent);
         this.addMessage(
           detail
-            ? `${LABEL[agent]}は 「${detail.slice(0, 28)}」に とりくんでいる…`
-            : `${LABEL[agent]}は かんがえている…`,
+            ? `${LABEL[agent] ?? agent}は 「${detail.slice(0, 28)}」に とりくんでいる…`
+            : `${LABEL[agent] ?? agent}は かんがえている…`,
         );
         return this.walkToCenter(agent, () => {
           this.setBubble(agent, "…");
@@ -371,13 +451,13 @@ class HiveRpgScene extends Phaser.Scene {
         });
       }
       case "agent_output": {
-        if (!AGENTS.includes(agent)) return this.finish(0);
+        if (!this.chars.has(agent)) return this.finish(0);
         // 一瞬で終わったタスクも MIN_WORK_MS は「働いている姿」を見せる
         const started = this.startedAt.get(agent) ?? 0;
         const wait = Math.max(0, MIN_WORK_MS - (this.time.now - started));
         return this.time.delayedCall(wait, () => {
           this.setBubble(agent, "！");
-          this.addMessage(`${LABEL[agent]}の しごとが おわった`);
+          this.addMessage(`${LABEL[agent] ?? agent}の しごとが おわった`);
           this.setStatus(agent, "かんりょう", "#34d399");
           // 直後に受け渡し(handoff)が控えている場合は、その場で待つ（行って戻りを防ぐ）
           const next = this.queue[0];
@@ -388,28 +468,29 @@ class HiveRpgScene extends Phaser.Scene {
         });
       }
       case "handoff": {
-        const from = String(d.from_agent ?? "") as AgentName;
-        const to = String(d.to_agent ?? "") as AgentName;
-        if (!AGENTS.includes(from) || !AGENTS.includes(to)) return this.finish(0);
+        const from = String(d.from_agent ?? "");
+        const to = String(d.to_agent ?? "");
+        if (!this.chars.has(from) || !this.chars.has(to)) return this.finish(0);
         const item = String(d.item ?? "せいかぶつ");
         const detail = String(d.detail ?? "");
         if (detail) this.pendingDetail.set(to, detail);
         // 2体が中央で向かい合い、会話してタスクを渡す（A2Aの可視化）
         this.centered = null;
         this.setBubble(from, "");
-        this.addMessage(`${LABEL[from]}「${item}が できたぞ！」`);
+        this.addMessage(`${LABEL[from] ?? from}「${item}が できたぞ！」`);
         this.setStatus(from, "かんりょう", "#34d399");
         this.moveChar(from, STAGE.x - 48, STAGE.y);
         return this.moveChar(to, STAGE.x + 48, STAGE.y, () => {
           this.setBubble(from, "💬");
           this.setBubble(to, "…");
           this.time.delayedCall(1000, () => {
-            this.addMessage(`${LABEL[to]}「まかせろ！」── ${item}を うけとった`);
+            this.addMessage(`${LABEL[to] ?? to}「まかせろ！」── ${item}を うけとった`);
             this.setBubble(from, "");
             this.setBubble(to, "！");
             this.setStatus(to, "しごとちゅう", "#fbbf24");
             this.startedAt.set(to, this.time.now);
-            this.moveChar(from, HOME[from].x, HOME[from].y);
+            const fromHome = this.homes.get(from);
+            if (fromHome) this.moveChar(from, fromHome.x, fromHome.y);
             this.time.delayedCall(350, () => {
               this.centered = to;
               this.moveChar(to, STAGE.x, STAGE.y, () => {
@@ -421,6 +502,7 @@ class HiveRpgScene extends Phaser.Scene {
         });
       }
       case "security_start":
+        if (!this.chars.has("security_reviewer")) return this.finish(0);
         this.setStatus("security_reviewer", "かんさちゅう", "#fb7185");
         this.addMessage("セキュリティかんさ かいし！");
         return this.walkToCenter("security_reviewer", () => {
@@ -475,13 +557,16 @@ class HiveRpgScene extends Phaser.Scene {
         this.addMessage(`もういちど ちょうせん！（${String(d.attempt)}/${String(d.max)}）`);
         return this.finish(800);
       case "escalation": {
+        const target = this.chars.has(agent) ? agent : "implementer";
         this.cameras.main.flash(500, 255, 255, 255);
         this.addMessage("しょうかんかいじょ！");
-        const impl = this.chars.get("implementer");
+        const char = this.chars.get(target);
         return this.time.delayedCall(600, () => {
-          impl?.setTexture("implementer_pro");
-          this.addMessage(`あたらしい${LABEL.implementer}（上位モデル）が なかまに くわわった！`);
-          this.setStatus("implementer", "パワーアップ", "#c084fc");
+          if (this.textures.exists(`${target}_pro`)) char?.setTexture(`${target}_pro`);
+          this.addMessage(
+            `あたらしい${LABEL[target] ?? target}（上位モデル）が なかまに くわわった！`,
+          );
+          this.setStatus(target, "パワーアップ", "#c084fc");
           this.finish(900);
         });
       }
@@ -490,10 +575,9 @@ class HiveRpgScene extends Phaser.Scene {
         return this.finish(800);
       case "done": {
         this.addMessage("クエスト かんりょう！ せいかぶつを のうひんした");
-        for (const name of AGENTS) {
-          const img = this.chars.get(name);
-          if (img) this.tweens.add({ targets: img, y: img.y - 14, duration: 160, yoyo: true, repeat: 2 });
-        }
+        this.chars.forEach((img) => {
+          this.tweens.add({ targets: img, y: img.y - 14, duration: 160, yoyo: true, repeat: 2 });
+        });
         return this.finish(500);
       }
       case "error":

@@ -78,3 +78,36 @@ def test_thin_content_fails():
     result = check_web(thin)
     assert not result.passed
     assert "本文テキスト" in result.output
+
+
+# --- check_frontend（フルスタックの契約チェック）---
+
+from shared.webcheck import check_frontend  # noqa: E402
+
+_ENDPOINTS = ["POST /expenses 収支の登録", "GET /expenses 一覧取得", "DELETE /expenses/{id} 削除"]
+
+
+def _page_with_fetch(path: str) -> str:
+    script = '<script>fetch("http://localhost:8000' + path + '")</script>'
+    return GOOD_PAGE.replace("</body>", script + "</body>")
+
+
+def test_frontend_with_contract_reference_passes():
+    result = check_frontend(_page_with_fetch("/expenses"), _ENDPOINTS)
+    assert result.passed, result.output
+
+
+def test_frontend_without_contract_reference_fails():
+    result = check_frontend(GOOD_PAGE, _ENDPOINTS)
+    assert not result.passed
+    assert "契約違反" in result.output
+
+
+def test_frontend_path_param_prefix_matches():
+    result = check_frontend(_page_with_fetch("/expenses/1"), _ENDPOINTS)
+    assert result.passed, result.output
+
+
+def test_frontend_no_endpoints_means_no_contract_check():
+    result = check_frontend(GOOD_PAGE, [])
+    assert result.passed

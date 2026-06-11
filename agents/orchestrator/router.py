@@ -19,11 +19,15 @@ def classify(text: str) -> dict[str, str]:
     text = (text or "").strip()
     lowered = text.lower()
     if any(k in lowered for k in ("api", "crud", "fastapi", "エンドポイント")):
-        task_type = "api"
-    elif any(k in lowered for k in ("lp", "ランディング", "html", "サイト")):
+        task_type = "api"  # APIを明示した発注が最優先
+    elif any(k in lowered for k in ("lp", "ランディング", "ホームページ", "サイト", "ページ")):
         task_type = "lp"
+    elif any(
+        k in lowered for k in ("アプリ", "画面", "ダッシュボード", "管理画面", "フルスタック", "ui")
+    ):
+        task_type = "app"  # API + 画面のフルスタック（M8）
     else:
-        task_type = "api"  # M1の既定はAPIパイプライン
+        task_type = "api"  # 既定はAPIパイプライン
     scale = "heavy" if len(text) > 200 else "light"
     return {"task_type": task_type, "scale": scale}
 

@@ -24,15 +24,18 @@ _INSTRUCTION = (
 )
 
 
-def make_implementer(model: str = FLASH) -> Agent:
-    """implementer を任意のモデルで生成する。F-13 の交代（Flash→Pro）で model を差し替える。"""
+def make_implementer(model: str = FLASH, extra_instruction: str = "") -> Agent:
+    """implementer を任意のモデルで生成する。F-13 の交代（Flash→Pro）で model を差し替える。
+
+    extra_instruction: パイプライン固有の追加指示（appモードの責任範囲の限定など）。
+    """
     return Agent(
         name="implementer",
         model=model,
         description="設計仕様から動作するFastAPIコードを生成する実装担当",
         output_schema=ImplementationResult,
         tools=[skill_toolset("python-style", "fastapi")],
-        instruction=_INSTRUCTION,
+        instruction=_INSTRUCTION + extra_instruction,
     )
 
 
