@@ -578,8 +578,9 @@ class HiveRpgScene extends Phaser.Scene {
         const party = (d.party as { agent: string; role: string }[]) ?? [];
         if (party.length > 0) this.spawnParty(party);
         const names = party.map((p) => LABEL[p.agent] ?? p.agent).join("・");
+        const quality = String(d.quality ?? "");
         this.addMessage(
-          `オーケストレーターが はたらきバチを へんせいした！（${String(d.task_type ?? "")}）`,
+          `オーケストレーターが はたらきバチを へんせいした！（${String(d.task_type ?? "")}${quality ? "・" + quality : ""}）`,
         );
         if (names) this.addMessage(`なかま：${names}`);
         return this.finish(1100);

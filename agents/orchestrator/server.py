@@ -29,7 +29,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from agents.app.agent import frontend_agent, make_app_implementer, make_frontend
+from agents.app.agent import make_app_implementer, make_frontend
 from agents.implementer.agent import make_implementer
 from agents.orchestrator.router import classify
 from agents.orchestrator.workflow import build_workflow
@@ -37,7 +37,7 @@ from agents.security_reviewer.agent import security_reviewer_agent
 from agents.tester.agent import tester_agent
 from agents.web.agent import make_web_implementer
 from shared.memory import ReasoningBank, render_memories
-from shared.models import PRO
+from shared.models import FLASH, PRO
 from shared.sandbox import VerificationResult, verify_fastapi
 from shared.webcheck import check_frontend, check_web
 from shared.security_patterns import (
@@ -222,11 +222,31 @@ def _parse_security(text: str | None) -> SecurityReport | None:
         return None
 
 
-async def _run_stream(task: str) -> AsyncIterator[dict]:
+def _quality_plan(quality: str, task_type: str, scale: str) -> dict:
+    """品質レベル（UI選択）を実行計画に解決する（F-02）。
+
+    "auto"（既定）は router の判定で自動決定：重い発注（scale=heavy）と
+    フルスタック（app）は最初から Pro で作る。Flashで2回失敗してから
+    Pro に交代するより、速く・安く・高品質に着地するため。
+    """
+    if quality not in ("fast", "best"):
+        quality = "best" if (scale == "heavy" or task_type == "app") else "balanced"
+    if quality == "fast":
+        # はやさ優先：Flashのみ・交代なし（その分リトライは軽く回る）
+        return {"label": "はやさ優先", "designer": FLASH, "implementer": FLASH, "escalate": False}
+    if quality == "best":
+        # 品質優先：設計・実装とも最初から Pro（交代の余地なし＝最初から最強）
+        return {"label": "品質優先", "designer": PRO, "implementer": PRO, "escalate": False}
+    # バランス：Flashで始め、最終試行だけ Pro に交代（F-13）
+    return {"label": "バランス", "designer": FLASH, "implementer": FLASH, "escalate": True}
+
+
+async def _run_stream(task: str, quality: str = "auto") -> AsyncIterator[dict]:
     """発注→（実装→検証→失敗なら修正）ループ→記録、を SSE で逐次配信する（F-04）。"""
     yield _sse("task_received", task=task)
     decision = classify(task)
     task_type = decision["task_type"]
+    plan = _quality_plan(quality, task_type, decision["scale"])
     # 編成（F-02 動的エージェント組成）：このタスクで働くAgentをUIに知らせる
     party = list(_PARTY[task_type])
     if _SECURITY != "0":
@@ -235,6 +255,8 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
         "router",
         task_type=task_type,
         scale=decision["scale"],
+        quality=plan["label"],
+        model=plan["implementer"],
         party=[{"agent": a, "role": AGENT_ROLE.get(a, "")} for a in party],
     )
 
@@ -247,8 +269,11 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
     outputs: dict[str, str] = {}
     result: VerificationResult | None = None
     try:
-        # 試行1：WorkflowAgent グラフ（タスク種別に応じたパイプライン・F-02）
-        runner = InMemoryRunner(agent=build_workflow(task_type), app_name=APP_NAME)
+        # 試行1：WorkflowAgent グラフ（タスク種別＋品質レベルに応じたパイプライン・F-02）
+        runner = InMemoryRunner(
+            agent=build_workflow(task_type, plan["designer"], plan["implementer"]),
+            app_name=APP_NAME,
+        )
         session = await runner.session_service.create_session(app_name=APP_NAME, user_id="ui")
         message = types.Content(role="user", parts=[types.Part(text=base_prompt)])
         # 最初の担当には今この瞬間にタスクが渡る。以降は handoff が次の開始を知らせる
@@ -281,12 +306,13 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
             """
             yield _sse("retry", attempt=next_attempt, max=MAX_ATTEMPTS, reason=headline)
             # F-13 交代：最終試行はモデルを格上げ（Flash→Pro）した新インスタンスに交代
+            # （品質優先プランは最初からPro＝交代不要。はやさ優先は交代しない約束）
             factory = _IMPL_FACTORY[task_type]
-            if next_attempt == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
+            if plan["escalate"] and next_attempt == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
                 yield _sse("escalation", agent="implementer", to_model=PRO)
                 implementer = factory(PRO)
             else:
-                implementer = factory()
+                implementer = factory(plan["implementer"])
             fix_prompt = (
                 f"{base_prompt}\n\n[設計]\n{design}\n\n"
                 f"[前回の実装]\n{_field(outputs.get('implementer'), result_key)}\n\n"
@@ -420,7 +446,7 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                 f"{base_prompt}\n\n[設計]\n{design}\n\n{contract}\n\n"
                 "この契約どおりにAPIを呼び出す画面（単一ファイルの index.html）を実装してください。"
             )
-            frontend = frontend_agent
+            frontend = make_frontend(plan["implementer"])
             for fe_attempt in range(1, MAX_ATTEMPTS + 1):
                 fe_out: dict = {}
                 async for ev in _invoke(frontend, fe_prompt, fe_out):
@@ -448,7 +474,7 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                     max=MAX_ATTEMPTS,
                     reason=f"画面: {_page_reason(fe_result.output)}",
                 )
-                if fe_attempt + 1 == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
+                if plan["escalate"] and fe_attempt + 1 == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
                     yield _sse("escalation", agent="frontend", to_model=PRO)
                     frontend = make_frontend(PRO)
                 fe_prompt = (
@@ -493,7 +519,8 @@ def _remember(task_type: str, outputs: dict[str, str], result: VerificationResul
 
 async def stream(request: Request) -> EventSourceResponse:
     task = request.query_params.get("task") or DEFAULT_TASK
-    return EventSourceResponse(_run_stream(task))
+    quality = request.query_params.get("quality") or "auto"
+    return EventSourceResponse(_run_stream(task, quality))
 
 
 async def health(_: Request) -> JSONResponse:

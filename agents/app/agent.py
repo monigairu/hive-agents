@@ -45,11 +45,11 @@ _FRONTEND_INSTRUCTION = (
 )
 
 
-def make_app_designer() -> Agent:
+def make_app_designer(model: str = FLASH) -> Agent:
     """フルスタックdesigner を生成する。グラフを組むたびに新インスタンスを作る。"""
     return Agent(
         name="designer",
-        model=FLASH,
+        model=model,
         description="発注からAPIと画面の両方の設計仕様を起こすフルスタック設計担当",
         output_schema=AppDesignSpec,
         tools=[skill_toolset("api-design", "web-design")],

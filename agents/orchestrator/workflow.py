@@ -49,27 +49,40 @@ def _node(local_agent: BaseAgent, name: str) -> BaseAgent:
     return local_agent
 
 
-def build_workflow(task_type: str = "api") -> Workflow:
+def build_workflow(
+    task_type: str = "api",
+    designer_model: str | None = None,
+    implementer_model: str | None = None,
+) -> Workflow:
     """タスク種別に応じたパイプラインのグラフを組む（F-02 差し込み式）。
 
     ルーティング判断は呼び出し側が router.classify で行い（コスト$0・決定論的）、
-    ここでは該当する直列パイプラインを返す。
+    モデルは品質レベル（F-02：ユーザー選択＋自動判定）に応じて差し替える。
     - api: designer → implementer → tester（A2A切り替え対応）
     - lp : web designer → web implementer（M8。当面プロセス内実行のみ）
+    - app: app designer → app implementer → tester（frontend は後段で orchestrator が起動）
     """
+    from shared.models import FLASH
+
+    d_model = designer_model or FLASH
+    i_model = implementer_model or FLASH
     # 注意：グラフのノードは必ず「呼び出しごとに新しいAgentインスタンス」を使う。
     # Workflow はAgentにモード等の状態を持たせるため、インスタンスを複数のグラフで
     # 使い回すと2つ目以降の構築が "mode='chat'" の検証エラーで落ちる。
     if task_type == "app":
-        # フルスタック：設計だけapp版に差し替え、実装・テストはAPI版を再利用。
-        # frontend（画面担当）はバックエンド検証の通過後に orchestrator が起動する
         from agents.app.agent import make_app_designer, make_app_implementer
 
         return Workflow(
             name="hive_orchestrator",
             description="自然言語の発注をフルスタック設計→API実装→テストで処理する（画面は後段）",
             edges=[
-                ("START", route_task, make_app_designer(), make_app_implementer(), make_tester()),
+                (
+                    "START",
+                    route_task,
+                    make_app_designer(d_model),
+                    make_app_implementer(i_model),
+                    make_tester(),
+                ),
             ],
         )
     if task_type == "lp":
@@ -80,11 +93,11 @@ def build_workflow(task_type: str = "api") -> Workflow:
             name="hive_orchestrator",
             description="自然言語の発注をWebページパイプライン(designer→implementer)で処理する",
             edges=[
-                ("START", route_task, make_web_designer(), make_web_implementer()),
+                ("START", route_task, make_web_designer(d_model), make_web_implementer(i_model)),
             ],
         )
-    designer = _node(make_designer(), "designer")
-    implementer = _node(make_implementer(), "implementer")
+    designer = _node(make_designer(d_model), "designer")
+    implementer = _node(make_implementer(i_model), "implementer")
     tester = _node(make_tester(), "tester")
     return Workflow(
         name="hive_orchestrator",

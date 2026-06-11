@@ -66,6 +66,7 @@ function downloadFile(filename: string, content: string) {
 
 export default function RpgPage() {
   const [task, setTask] = useState("タスク管理のCRUD APIをFastAPIで作って");
+  const [quality, setQuality] = useState("auto");
   const [running, setRunning] = useState(false);
   const [artifact, setArtifact] = useState<Artifact | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -131,7 +132,7 @@ export default function RpgPage() {
   }, []);
 
   function start() {
-    quest.start(task); // __reset が飛び、subscribe 経由で表示が切り替わる
+    quest.start(task, quality); // __reset が飛び、subscribe 経由で表示が切り替わる
   }
 
   return (
@@ -162,6 +163,17 @@ export default function RpgPage() {
           placeholder="例: 喫茶店のおしゃれなLPを作って／在庫管理のCRUD APIを作って"
           disabled={running}
         />
+        <select
+          value={quality}
+          onChange={(e) => setQuality(e.target.value)}
+          disabled={running}
+          title="品質レベル：使うモデルと作り込みを調整します"
+          className="rounded-lg border border-neutral-300 px-2 py-2 text-sm outline-none focus:border-amber-400 dark:border-neutral-700 dark:bg-neutral-900"
+        >
+          <option value="auto">おまかせ</option>
+          <option value="fast">はやさ優先</option>
+          <option value="best">品質優先</option>
+        </select>
         <button
           onClick={start}
           disabled={running}

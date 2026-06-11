@@ -37,11 +37,11 @@ _IMPLEMENTER_INSTRUCTION = (
 )
 
 
-def make_web_designer() -> Agent:
+def make_web_designer(model: str = FLASH) -> Agent:
     """web版designer を生成する。グラフを組むたびに新インスタンスを作る。"""
     return Agent(
         name="designer",
-        model=FLASH,
+        model=model,
         description="発注からWebページのデザイン仕様（性格・構成・スタイル方針）を起こす設計担当",
         output_schema=WebDesignSpec,
         tools=[skill_toolset("web-design")],
