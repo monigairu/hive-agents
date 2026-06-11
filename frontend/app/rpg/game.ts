@@ -15,6 +15,8 @@ export type HiveEvent = { type: string; data: Record<string, unknown> };
 
 export type HiveGame = {
   enqueue: (e: HiveEvent) => void;
+  /** 過去イベントを瞬間適用して途中状態を復元する（ページ遷移からの復帰用） */
+  replay: (events: HiveEvent[]) => void;
   destroy: () => void;
 };
 
@@ -226,6 +228,8 @@ class HiveRpgScene extends Phaser.Scene {
   private startedAt = new Map<string, number>();
   /** handoff で受け取った「次は何をするか」をagent_startの台詞に使う */
   private pendingDetail = new Map<string, string>();
+  private ready = false;
+  private pendingReplay: HiveEvent[] | null = null;
 
   constructor() {
     super("hive-rpg");
@@ -233,6 +237,36 @@ class HiveRpgScene extends Phaser.Scene {
 
   enqueue(e: HiveEvent) {
     this.queue.push(e);
+  }
+
+  /** 過去イベントを瞬間適用して途中状態を復元する。create前に呼ばれたら保留する。 */
+  replay(events: HiveEvent[]) {
+    if (!this.ready) {
+      this.pendingReplay = events;
+      return;
+    }
+    this.tweens.killAll();
+    this.queue = [];
+    this.busy = false;
+    this.messages = [];
+    this.messageText.setText("");
+    this.clearParty();
+    if (events.length === 0) {
+      this.addMessage("クエストを 発注すると オーケストレーターが はたらきバチを へんせいする…");
+      return;
+    }
+    for (const e of events) this.applyInstant(e);
+    // spawnParty の登場アニメ等が適用後に位置を動かさないよう止め、最終位置を確定する
+    this.tweens.killAll();
+    this.chars.forEach((_, name) => {
+      if (name === this.centered) {
+        this.placeAt(name, STAGE.x, STAGE.y);
+        this.setBubble(name, "…");
+      } else {
+        const home = this.homes.get(name);
+        if (home) this.placeAt(name, home.x, home.y);
+      }
+    });
   }
 
   create() {
@@ -243,11 +277,16 @@ class HiveRpgScene extends Phaser.Scene {
     this.drawGround();
     this.drawMessageWindow();
     this.addMessage("クエストを 発注すると オーケストレーターが はたらきバチを へんせいする…");
+    this.ready = true;
+    if (this.pendingReplay) {
+      const events = this.pendingReplay;
+      this.pendingReplay = null;
+      this.replay(events);
+    }
   }
 
-  /** router の編成結果に従ってパーティを出現させる（F-02 動的エージェント組成）。 */
-  private spawnParty(party: { agent: string; role: string }[]) {
-    // 前回の編成を片付ける
+  /** 編成を片付ける（再編成・リプレイの前処理）。 */
+  private clearParty() {
     for (const obj of this.partyUi) obj.destroy();
     this.partyUi = [];
     this.chars.forEach((c) => c.destroy());
@@ -257,6 +296,11 @@ class HiveRpgScene extends Phaser.Scene {
     this.statusText.clear();
     this.homes.clear();
     this.centered = null;
+  }
+
+  /** router の編成結果に従ってパーティを出現させる（F-02 動的エージェント組成）。 */
+  private spawnParty(party: { agent: string; role: string }[]) {
+    this.clearParty();
 
     const n = party.length;
     const winW = Math.min(180, Math.floor((W - 16) / n) - 6);
@@ -408,6 +452,117 @@ class HiveRpgScene extends Phaser.Scene {
     this.time.delayedCall(delay, () => {
       this.busy = false;
     });
+  }
+
+  // --- リプレイ（瞬間復元）----------------------------------------------------
+
+  private placeAt(agent: string, x: number, y: number) {
+    this.chars.get(agent)?.setPosition(x, y);
+    this.bubbles.get(agent)?.setPosition(x, y - 64);
+  }
+
+  private placeHome(agent: string) {
+    const home = this.homes.get(agent);
+    if (home) this.placeAt(agent, home.x, home.y);
+    this.setBubble(agent, "");
+    if (this.centered === agent) this.centered = null;
+  }
+
+  private placeCenter(agent: string) {
+    if (this.centered && this.centered !== agent) this.placeHome(this.centered);
+    this.centered = agent;
+    this.placeAt(agent, STAGE.x, STAGE.y);
+    this.setBubble(agent, "…");
+  }
+
+  /** 1イベントをアニメーションなしで適用する（handle() の瞬間版）。 */
+  private applyInstant(e: HiveEvent) {
+    const d = e.data;
+    const agent = String(d.agent ?? "");
+    switch (e.type) {
+      case "task_received":
+        return this.addMessage(`クエスト：${String(d.task ?? "").slice(0, 40)}`);
+      case "router": {
+        const party = (d.party as { agent: string; role: string }[]) ?? [];
+        if (party.length > 0) this.spawnParty(party);
+        const names = party.map((p) => LABEL[p.agent] ?? p.agent).join("・");
+        if (names) this.addMessage(`なかま：${names}`);
+        return;
+      }
+      case "memory_recall": {
+        const lessons = (d.lessons as string[]) ?? [];
+        return this.addMessage(`むかしの きおくを おもいだした：${(lessons[0] ?? "").slice(0, 30)}`);
+      }
+      case "agent_start":
+        if (!this.chars.has(agent)) return;
+        this.setStatus(agent, "しごとちゅう", "#fbbf24");
+        // 復元直後にライブの完了が届いても余計に待たせない
+        this.startedAt.set(agent, this.time.now - MIN_WORK_MS);
+        this.addMessage(`${LABEL[agent] ?? agent}は はたらいている…`);
+        return this.placeCenter(agent);
+      case "agent_output":
+        if (!this.chars.has(agent)) return;
+        this.setStatus(agent, "かんりょう", "#34d399");
+        this.addMessage(`${LABEL[agent] ?? agent}の しごとが おわった`);
+        return this.placeHome(agent);
+      case "handoff": {
+        const from = String(d.from_agent ?? "");
+        const to = String(d.to_agent ?? "");
+        const item = String(d.item ?? "せいかぶつ");
+        const detail = String(d.detail ?? "");
+        if (detail) this.pendingDetail.set(to, detail);
+        this.addMessage(`${LABEL[from] ?? from}が ${item}を ${LABEL[to] ?? to}に わたした`);
+        if (this.chars.has(from)) {
+          this.setStatus(from, "かんりょう", "#34d399");
+          this.placeHome(from);
+        }
+        if (this.chars.has(to)) {
+          this.setStatus(to, "しごとちゅう", "#fbbf24");
+          this.startedAt.set(to, this.time.now - MIN_WORK_MS);
+          this.placeCenter(to);
+        }
+        return;
+      }
+      case "security_start":
+        if (!this.chars.has("security_reviewer")) return;
+        this.setStatus("security_reviewer", "かんさちゅう", "#fb7185");
+        return this.placeCenter("security_reviewer");
+      case "security_result": {
+        const passed = String(d.passed) === "true";
+        this.addMessage(passed ? "セキュリティかんさ クリア" : "ぜいじゃくせいあり！");
+        if (this.chars.has("security_reviewer")) {
+          this.setStatus(
+            "security_reviewer",
+            passed ? "かんりょう" : "ようちゅうい",
+            passed ? "#34d399" : "#f87171",
+          );
+          this.placeHome("security_reviewer");
+        }
+        return;
+      }
+      case "verify_result": {
+        const passed = String(d.passed) === "true";
+        return this.addMessage(passed ? "けんしょう クリア！" : "けんしょう しっぱい…");
+      }
+      case "retry":
+        return this.addMessage(`もういちど ちょうせん！（${String(d.attempt)}/${String(d.max)}）`);
+      case "escalation": {
+        const target = this.chars.has(agent) ? agent : "implementer";
+        if (this.textures.exists(`${target}_pro`)) {
+          this.chars.get(target)?.setTexture(`${target}_pro`);
+        }
+        this.setStatus(target, "パワーアップ", "#c084fc");
+        return this.addMessage("しょうかんかいじょ！ 上位モデルに こうたいした");
+      }
+      case "memory_write":
+        return this.addMessage(`ぼうけんのしょに きろくした：${String(d.title ?? "").slice(0, 30)}`);
+      case "done":
+        return this.addMessage("クエスト かんりょう！ せいかぶつを のうひんした");
+      case "error":
+        return this.addMessage(`エラーが おきた：${String(d.message ?? "").slice(0, 40)}`);
+      default:
+        return;
+    }
   }
 
   // --- イベント → 演出 -------------------------------------------------------
@@ -603,6 +758,7 @@ export function createGame(parent: HTMLElement): HiveGame {
   });
   return {
     enqueue: (e) => scene.enqueue(e),
+    replay: (events) => scene.replay(events),
     destroy: () => game.destroy(true),
   };
 }

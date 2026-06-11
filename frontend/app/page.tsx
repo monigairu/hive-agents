@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useState } from "react";
+
+import { HistorySidebar } from "./components/HistorySidebar";
+import * as quest from "./lib/quest";
 
 // Orchestrator(SSE) のエンドポイント。デプロイ時は NEXT_PUBLIC_HIVE_API で差し替え。
-const API = process.env.NEXT_PUBLIC_HIVE_API ?? "http://localhost:8000";
-
 // Agentの表示定義（要件 F-14：M7でドット絵キャラに昇格）
 // ドラクエ風は絵文字・口調・演出で出し、表示名は「何をしている係か」が
 // 一般の人にも一目でわかる役割名を主表示にする（職業名は使わない）。
@@ -54,6 +55,111 @@ type TimelineItem =
 let _id = 0;
 const nextId = () => ++_id;
 
+/** 1つのSSEイベントをタイムライン一覧に適用する（ライブ・復元の両方で使う）。 */
+// SSEペイロードは動的なため data は any 扱い（型はTimelineItem側で固定する）
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyEvent(prev: TimelineItem[], type: string, d: any): TimelineItem[] {
+  switch (type) {
+    case "task_received":
+      return [...prev, { id: nextId(), kind: "task", task: d.task }];
+    case "router":
+      return [
+        ...prev,
+        {
+          id: nextId(),
+          kind: "router",
+          taskType: d.task_type,
+          scale: d.scale,
+          party: ((d.party as { agent: string }[]) ?? []).map((p) => labelOf(p.agent)),
+        },
+      ];
+    case "memory_recall":
+      return [...prev, { id: nextId(), kind: "recall", lessons: d.lessons ?? [] }];
+    case "agent_start":
+      return [...prev, { id: nextId(), kind: "thinking", agent: d.agent, role: d.role }];
+    case "agent_output":
+      // 直前の「かんがえている…」を消して成果に置き換える
+      return [
+        ...prev.filter((it) => !(it.kind === "thinking" && it.agent === d.agent)),
+        { id: nextId(), kind: "output", agent: d.agent, role: d.role, text: d.text },
+      ];
+    case "handoff":
+      return [
+        ...prev,
+        {
+          id: nextId(),
+          kind: "handoff",
+          from: d.from_agent,
+          to: d.to_agent,
+          item: d.item ?? "",
+          detail: d.detail ?? "",
+        },
+      ];
+    case "security_start":
+      return [...prev, { id: nextId(), kind: "securing" }];
+    case "security_result":
+      return [
+        ...prev.filter((it) => it.kind !== "securing"),
+        {
+          id: nextId(),
+          kind: "security",
+          passed: String(d.passed) === "true",
+          summary: d.summary ?? "",
+          findings: (d.findings as SecurityFinding[]) ?? [],
+        },
+      ];
+    case "verify_start":
+      return [...prev, { id: nextId(), kind: "verifying", mode: d.mode ?? "pytest" }];
+    case "verify_result":
+      return [
+        ...prev.filter((it) => it.kind !== "verifying"),
+        {
+          id: nextId(),
+          kind: "verify",
+          passed: String(d.passed) === "true",
+          output: d.output,
+          mode: d.mode ?? "pytest",
+        },
+      ];
+    case "memory_write":
+      return [
+        ...prev,
+        {
+          id: nextId(),
+          kind: "remember",
+          success: d.kind === "success",
+          title: d.title,
+          forgotten: Number(d.forgotten ?? 0),
+        },
+      ];
+    case "retry":
+      return [
+        ...prev,
+        {
+          id: nextId(),
+          kind: "retry",
+          attempt: Number(d.attempt),
+          max: Number(d.max),
+          reason: d.reason ?? "",
+        },
+      ];
+    case "escalation":
+      return [
+        ...prev,
+        { id: nextId(), kind: "escalation", agent: d.agent, toModel: d.to_model },
+      ];
+    case "done":
+      return [...prev, { id: nextId(), kind: "done" }];
+    case "error":
+      return [
+        ...prev,
+        { id: nextId(), kind: "error", message: d.message ?? "接続が切れました" },
+      ];
+    default:
+      return prev;
+  }
+}
+
 /** agent_output の JSON を画面表示用に要約する。 */
 function summarize(agent: string, text: string) {
   try {
@@ -94,138 +200,39 @@ export default function Home() {
   const [task, setTask] = useState("タスク管理のCRUD APIをFastAPIで作って");
   const [items, setItems] = useState<TimelineItem[]>([]);
   const [running, setRunning] = useState(false);
-  const esRef = useRef<EventSource | null>(null);
 
-  const push = (item: TimelineItem) => setItems((prev) => [...prev, item]);
+  // 表示中クエスト（進行中 or 履歴選択）の一覧をストアから組み立て直す
+  const rebuild = () => {
+    const cur = quest.getCurrent();
+    if (cur) setTask(cur.task);
+    setItems(
+      (cur?.events ?? []).reduce(
+        (acc, e) => applyEvent(acc, e.type, e.data),
+        [] as TimelineItem[],
+      ),
+    );
+    setRunning(quest.isRunning());
+  };
+
+  // SSE接続は共有ストア(lib/quest)が持つので、ページ遷移しても一覧を復元できる
+  useEffect(() => {
+    rebuild();
+    return quest.subscribe((e) => {
+      if (e.type === "__reset") return rebuild();
+      setItems((prev) => applyEvent(prev, e.type, e.data));
+      if (e.type === "done" || e.type === "error") setRunning(false);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function start() {
-    if (running || !task.trim()) return;
-    esRef.current?.close();
-    setItems([]);
-    setRunning(true);
-
-    const es = new EventSource(`${API}/stream?task=${encodeURIComponent(task)}`);
-    esRef.current = es;
-
-    // カスタムイベントは Event 型で渡るため MessageEvent にキャストして data を読む。
-    // SSEペイロードは動的なため data は any 扱い（型はTimelineItem側で固定する）。
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const on = (name: string, fn: (data: any) => void) =>
-      es.addEventListener(name, (e) => {
-        const raw = (e as MessageEvent).data;
-        fn(raw ? JSON.parse(raw) : {});
-      });
-
-    on("task_received", (d) => push({ id: nextId(), kind: "task", task: d.task }));
-    on("router", (d) =>
-      push({
-        id: nextId(),
-        kind: "router",
-        taskType: d.task_type,
-        scale: d.scale,
-        party: ((d.party as { agent: string }[]) ?? []).map((p) => labelOf(p.agent)),
-      }),
-    );
-    on("memory_recall", (d) =>
-      push({ id: nextId(), kind: "recall", lessons: d.lessons ?? [] }),
-    );
-    on("agent_start", (d) =>
-      push({ id: nextId(), kind: "thinking", agent: d.agent, role: d.role }),
-    );
-    on("agent_output", (d) => {
-      // 直前の「かんがえている…」を消して成果に置き換える
-      setItems((prev) => {
-        const filtered = prev.filter(
-          (it) => !(it.kind === "thinking" && it.agent === d.agent),
-        );
-        return [
-          ...filtered,
-          { id: nextId(), kind: "output", agent: d.agent, role: d.role, text: d.text },
-        ];
-      });
-    });
-    on("handoff", (d) =>
-      push({
-        id: nextId(),
-        kind: "handoff",
-        from: d.from_agent,
-        to: d.to_agent,
-        item: d.item ?? "",
-        detail: d.detail ?? "",
-      }),
-    );
-    on("security_start", () => push({ id: nextId(), kind: "securing" }));
-    on("security_result", (d) => {
-      setItems((prev) => {
-        const filtered = prev.filter((it) => it.kind !== "securing");
-        return [
-          ...filtered,
-          {
-            id: nextId(),
-            kind: "security",
-            passed: String(d.passed) === "true",
-            summary: d.summary ?? "",
-            findings: (d.findings as SecurityFinding[]) ?? [],
-          },
-        ];
-      });
-    });
-    on("verify_start", (d) =>
-      push({ id: nextId(), kind: "verifying", mode: d.mode ?? "pytest" }),
-    );
-    on("verify_result", (d) => {
-      setItems((prev) => {
-        const filtered = prev.filter((it) => it.kind !== "verifying");
-        return [
-          ...filtered,
-          {
-            id: nextId(),
-            kind: "verify",
-            passed: String(d.passed) === "true",
-            output: d.output,
-            mode: d.mode ?? "pytest",
-          },
-        ];
-      });
-    });
-    on("memory_write", (d) =>
-      push({
-        id: nextId(),
-        kind: "remember",
-        success: d.kind === "success",
-        title: d.title,
-        forgotten: Number(d.forgotten ?? 0),
-      }),
-    );
-    on("retry", (d) =>
-      push({
-        id: nextId(),
-        kind: "retry",
-        attempt: Number(d.attempt),
-        max: Number(d.max),
-        reason: d.reason ?? "",
-      }),
-    );
-    on("escalation", (d) =>
-      push({ id: nextId(), kind: "escalation", agent: d.agent, toModel: d.to_model }),
-    );
-    on("done", () => {
-      push({ id: nextId(), kind: "done" });
-      setRunning(false);
-      es.close(); // SSEの自動再接続を止める（重要）
-    });
-    es.addEventListener("error", (e) => {
-      // アプリ起因のエラーイベント（dataあり）と接続断（dataなし）の両方を処理
-      const msg =
-        e instanceof MessageEvent && e.data ? JSON.parse(e.data).message : "接続が切れました";
-      push({ id: nextId(), kind: "error", message: msg });
-      setRunning(false);
-      es.close();
-    });
+    quest.start(task); // __reset が飛び、subscribe 経由で一覧が切り替わる
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-6 px-4 py-8">
+    <main className="mx-auto flex w-full max-w-5xl gap-5 px-4 py-8">
+      <HistorySidebar />
+      <div className="flex min-h-screen min-w-0 flex-1 flex-col gap-6">
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span className="text-3xl">🐝</span>
@@ -264,6 +271,7 @@ export default function Home() {
           <li key={it.id}>{renderItem(it)}</li>
         ))}
       </ol>
+      </div>
     </main>
   );
 }
