@@ -12,15 +12,15 @@ from agents.orchestrator.schemas import DesignSpec
 from shared.models import FLASH
 from shared.skills import skill_toolset
 
-def make_designer() -> Agent:
-    """designer を生成する。
+def make_designer(model: str = FLASH) -> Agent:
+    """designer を生成する。model は品質レベル（F-02）に応じて差し替える。
 
     Workflow はAgentインスタンスにモード等の状態を持たせるため、グラフを組むたびに
     新しいインスタンスを作る（使い回すと2つ目以降のグラフ構築で検証エラーになる）。
     """
     return Agent(
         name="designer",
-        model=FLASH,
+        model=model,
         description="発注内容からAPIの設計仕様（エンドポイント・ファイル構成）を起こす設計担当",
         output_schema=DesignSpec,
         tools=[skill_toolset("api-design")],

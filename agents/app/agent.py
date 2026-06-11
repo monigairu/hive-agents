@@ -32,20 +32,24 @@ _FRONTEND_INSTRUCTION = (
     "（単一ファイルの index.html）を実装してください。\n"
     "- **契約が最優先**：fetch するのは[APIけいやくしょ]に書かれたエンドポイントだけ。"
     "勝手に新しいパスやレスポンス形を発明しない\n"
-    "- APIのベースURLは `const API = \"http://localhost:8000\";` のように定数で先頭に置き、"
-    "ユーザーが書き換えられるようにする\n"
-    "- 読み込み中・空データ・エラーの3状態を必ず画面に出す（fetch失敗で白画面にしない）\n"
+    "- APIのベースURLは `const API = \"http://localhost:8001\";` のように定数で先頭に置き、"
+    "ユーザーが書き換えられるようにする（8000はHive本体が使うため8001を既定にする）\n"
+    "- 読み込み中・空データ・エラーの3状態を必ず画面に出す（fetch失敗で白画面にしない）。"
+    "エラー状態には「APIが起動していません。同梱の main.py を "
+    "`uvicorn main:app --port 8001` で起動してから再読み込みしてください」と"
+    "具体的な復旧手順を表示すること\n"
     "- 見た目は web-design スキルの原則に従う（性格を決めて振り切る・実コピー・外部画像禁止）\n"
     "- html はMarkdownのコードフェンスで囲まず、生のHTMLだけを入れること\n"
-    "- how_to_verify: APIの起動→index.htmlを開く→何を確認するか、の手順"
+    "- how_to_verify: APIの起動（必ず --port 8001 を付ける）→index.htmlを開く→"
+    "何を確認するか、の手順"
 )
 
 
-def make_app_designer() -> Agent:
+def make_app_designer(model: str = FLASH) -> Agent:
     """フルスタックdesigner を生成する。グラフを組むたびに新インスタンスを作る。"""
     return Agent(
         name="designer",
-        model=FLASH,
+        model=model,
         description="発注からAPIと画面の両方の設計仕様を起こすフルスタック設計担当",
         output_schema=AppDesignSpec,
         tools=[skill_toolset("api-design", "web-design")],

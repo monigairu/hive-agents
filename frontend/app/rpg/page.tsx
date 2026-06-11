@@ -3,28 +3,9 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
+import { HistorySidebar } from "../components/HistorySidebar";
+import * as quest from "../lib/quest";
 import type { HiveGame } from "./game";
-
-// Orchestrator(SSE) のエンドポイント。デプロイ時は NEXT_PUBLIC_HIVE_API で差し替え。
-const API = process.env.NEXT_PUBLIC_HIVE_API ?? "http://localhost:8000";
-
-// ゲームへ転送するSSEイベント（描画はすべて game.ts 側のマッピングで行う）
-const EVENTS = [
-  "task_received",
-  "router",
-  "memory_recall",
-  "agent_start",
-  "agent_output",
-  "handoff",
-  "security_start",
-  "security_result",
-  "verify_start",
-  "verify_result",
-  "retry",
-  "escalation",
-  "memory_write",
-  "done",
-];
 
 /** 完了時に表示する成果物（各Agentの最終出力JSONから組み立てる）。 */
 type Artifact = {
@@ -85,66 +66,79 @@ function downloadFile(filename: string, content: string) {
 
 export default function RpgPage() {
   const [task, setTask] = useState("タスク管理のCRUD APIをFastAPIで作って");
+  const [quality, setQuality] = useState("auto");
   const [running, setRunning] = useState(false);
   const [artifact, setArtifact] = useState<Artifact | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const gameRef = useRef<HiveGame | null>(null);
-  const esRef = useRef<EventSource | null>(null);
   const outputsRef = useRef<Record<string, string>>({});
 
-  // Phaser はブラウザ専用のため、マウント後に動的importで初期化する
+  // 表示中クエスト（進行中 or 履歴選択）の状態をストアから復元する
+  const restore = () => {
+    const cur = quest.getCurrent();
+    outputsRef.current = {};
+    if (cur) {
+      for (const e of cur.events) {
+        if (e.type === "agent_output") {
+          outputsRef.current[String(e.data.agent)] = String(e.data.text ?? "");
+        }
+      }
+      gameRef.current?.replay(cur.events);
+      setArtifact(cur.status === "running" ? null : buildArtifact(outputsRef.current));
+      setTask(cur.task);
+    } else {
+      gameRef.current?.replay([]);
+      setArtifact(null);
+    }
+    setRunning(quest.isRunning());
+  };
+
+  // Phaser はブラウザ専用のため、マウント後に動的importで初期化する。
+  // SSE接続は共有ストア(lib/quest)が持つので、ページ遷移してもクエストは途切れない。
   useEffect(() => {
     let cancelled = false;
+    let unsubscribe: (() => void) | undefined;
     (async () => {
-      const { createGame } = await import("./game");
-      if (!cancelled && containerRef.current && !gameRef.current) {
-        gameRef.current = createGame(containerRef.current);
+      // ドット日本語フォントの読み込みを待ってからキャンバスを作る（文字化け防止）
+      try {
+        await document.fonts.load('16px "DotGothic16"');
+      } catch {
+        /* フォントが取れなくてもフォールバックで描画する */
       }
+      const { createGame } = await import("./game");
+      if (cancelled || !containerRef.current || gameRef.current) return;
+      gameRef.current = createGame(containerRef.current);
+      restore();
+      unsubscribe = quest.subscribe((e) => {
+        if (e.type === "__reset") return restore();
+        gameRef.current?.enqueue(e);
+        if (e.type === "agent_output") {
+          outputsRef.current[String(e.data.agent)] = String(e.data.text ?? "");
+        }
+        if (e.type === "done") {
+          setArtifact(buildArtifact(outputsRef.current));
+          setRunning(false);
+        }
+        if (e.type === "error") setRunning(false);
+      });
     })();
     return () => {
       cancelled = true;
-      esRef.current?.close();
+      unsubscribe?.();
       gameRef.current?.destroy();
       gameRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function start() {
-    if (running || !task.trim()) return;
-    esRef.current?.close();
-    setRunning(true);
-    setArtifact(null);
-    outputsRef.current = {};
-
-    const es = new EventSource(`${API}/stream?task=${encodeURIComponent(task)}`);
-    esRef.current = es;
-
-    for (const name of EVENTS) {
-      es.addEventListener(name, (e) => {
-        const raw = (e as MessageEvent).data;
-        const data = raw ? JSON.parse(raw) : {};
-        gameRef.current?.enqueue({ type: name, data });
-        if (name === "agent_output") {
-          outputsRef.current[String(data.agent)] = String(data.text ?? "");
-        }
-        if (name === "done") {
-          setArtifact(buildArtifact(outputsRef.current));
-          setRunning(false);
-          es.close(); // SSEの自動再接続を止める（重要）
-        }
-      });
-    }
-    es.addEventListener("error", (e) => {
-      const message =
-        e instanceof MessageEvent && e.data ? JSON.parse(e.data).message : "接続が切れました";
-      gameRef.current?.enqueue({ type: "error", data: { message } });
-      setRunning(false);
-      es.close();
-    });
+    quest.start(task, quality); // __reset が飛び、subscribe 経由で表示が切り替わる
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-4 px-4 py-6">
+    <main className="mx-auto flex w-full max-w-6xl gap-5 px-4 py-6">
+      <HistorySidebar />
+      <div className="flex min-h-screen min-w-0 flex-1 flex-col gap-4">
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span className="text-3xl">🐝</span>
@@ -169,6 +163,17 @@ export default function RpgPage() {
           placeholder="例: 喫茶店のおしゃれなLPを作って／在庫管理のCRUD APIを作って"
           disabled={running}
         />
+        <select
+          value={quality}
+          onChange={(e) => setQuality(e.target.value)}
+          disabled={running}
+          title="品質レベル：使うモデルと作り込みを調整します"
+          className="rounded-lg border border-neutral-300 px-2 py-2 text-sm outline-none focus:border-amber-400 dark:border-neutral-700 dark:bg-neutral-900"
+        >
+          <option value="auto">おまかせ</option>
+          <option value="fast">はやさ優先</option>
+          <option value="best">品質優先</option>
+        </select>
         <button
           onClick={start}
           disabled={running}
@@ -294,6 +299,7 @@ export default function RpgPage() {
           </div>
         </section>
       )}
+      </div>
     </main>
   );
 }

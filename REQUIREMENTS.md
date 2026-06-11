@@ -1,9 +1,16 @@
-# Hive — 要件定義書 v2.7
+# Hive — 要件定義書 v2.8
 
 ## 0. このファイルについて
 
 Claude Codeが開発に入る前に読み込む要件定義書。
 実装の判断に迷ったときはここに立ち返ること。
+
+**v2.8の主な変更（実装監査を経て要件を実態に整合＋品質レベル導入）**
+- **品質レベルを導入（F-02）**：ユーザーがUIで「おまかせ／はやさ優先／品質優先」を選択。おまかせは routerが自動判定し、重い発注・フルスタックは**最初からProで作る**（Flashで2回失敗してから交代するより速く・安く・高品質）
+- **F-08を実態に更新**：Memory StoreはReasoningBank（Google Research論文ベースの自前実装・忘却つき）。Agent Engine Memory Bankは差し替え可能な将来移行先に位置づけ変更
+- **F-04サンドボックスを実態に更新**：uv隔離サンドボックス採用＋**環境変数の遮断**（生成コードに認証情報を晒さない）を追加。AgentEngineSandboxCodeExecutorは将来差し替え先
+- **reviewer・devops Agentを非採用に確定（§4.4）**：汎用reviewerは「弱いレビュアーは安心感だけ与える」（F-15）ため追加しない。デプロイ（F-06）は決定論的なコードとして実装し、LLM Agentにはしない（routerと同じ設計哲学）
+- §9リポジトリ構成・§4アーキテクチャ図を実装の実態（スキル共有カタログ・単一pyproject）に更新
 
 **v2.7の主な変更（実行モードとプレビューデプロイの確定）**
 - **F-06をプレビューデプロイ方式に変更**：`hive/`ブランチから直接Cloud Runへプレビューデプロイし、mainへのマージを待たずに完成URLを即返却。「発注→完成URL」の全自動E2Eと「mainは人間の手に残す」（F-05）が両立する
@@ -84,7 +91,7 @@ Claude Codeが開発に入る前に読み込む要件定義書。
 | GCP連携 | 手動 | IAM・Agent Engine・Cloud Loggingと統合 |
 | 対象 | 開発者個人 | チーム・他システムからもAPI呼び出し可能 |
 | 技術新規性 | プロンプト設計 | ADK 2.0 + A2A + MCP（2026年最先端） |
-| 経験の蓄積 | セッションごとにリセット | Agent Engine Memory Bankで成功・失敗が永続化 |
+| 経験の蓄積 | セッションごとにリセット | ReasoningBank（F-08）で成功・失敗の教訓が永続化 |
 
 > **Hiveは「Claude Codeの代替」ではなく「Google Cloudネイティブの開発自動化基盤」として位置づける。**
 > GCPをすでに使っている企業・チームが、開発自動化をGCPの中で完結させたいニーズに応える。
@@ -123,12 +130,12 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
 
 | ハーネスの4要素 | Hiveの対応機能 |
 |---|---|
-| ① リポジトリ知識を正本にする | F-08 Memory Bank（成功・失敗・コードベース知識の蓄積） |
+| ① リポジトリ知識を正本にする | F-08 ReasoningBank（成功・失敗の教訓の蓄積と忘却） |
 | ② エージェントが読める状態にする | F-07 SkillToolset（知識の3層構造） |
 | ③ 生成→修正の自走ループ | F-04 フィードバックループ＋サンドボックス自己検証＋F-15 |
 | ④ 原則の機械的強制・継続的な掃除 | F-09 Reflection Agent（Memory整理）＋F-13 交代 |
 
-> **審査での訴求**：「Hiveは単なるマルチエージェントではなく、ハーネスエンジニアリングの実装である。各エージェントがミスをするたびにMemory Bankが環境を改善し、二度と同じミスをしない。モデルの賢さではなく環境設計で品質を上げる、2026年最新のパラダイムを体現している。」
+> **審査での訴求**：「Hiveは単なるマルチエージェントではなく、ハーネスエンジニアリングの実装である。各エージェントがミスをするたびにReasoningBankが教訓を蒸留して環境を改善し、二度と同じミスをしない。モデルの賢さではなく環境設計で品質を上げる、2026年最新のパラダイムを体現している。」
 
 ---
 
@@ -158,31 +165,29 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
 - `router` Function Node がタスク内容を解析し、必要なAgentへ条件分岐
 - Function Nodeによる分岐はコスト$0・レイテンシほぼゼロで安定動作
 - LLMは各Agentノード内の処理にのみ使用し、ルーティング判断はコードで制御
-- 出力スキーマ例（Pydantic + ADK 2.x output_schema）：
-  ```python
-  class AgentPlan(BaseModel):
-      agents: list[str]
-      reason: str
-      execution_order: list[str]
-      phase: str        # どのフェーズに属するか
-      scale: str        # "light" | "heavy"（動員規模）
-  ```
-- 例：
-  - 「API作って」→ designer → implementer → tester → devops
-  - 「LP作って」→ designer → implementer（HTML/CSS）
+- routerの判定結果（task_type / scale / 編成party / 品質プラン）はSSEのrouterイベントとして
+  UIに流し、編成と判断根拠を可視化する（F-14）
+- 実装済みのパイプライン（差し込み式・タスク種で編成が変わる）：
+  - 「API作って」→ designer → implementer → tester
+  - 「LP作って」→ web designer → web implementer
+  - 「アプリ作って」→ app designer → implementer → tester → frontend（API契約に従って画面実装）
+  - いずれも HIVE_SECURITY 有効時は security-reviewer が監査として参加
 
 - **Phase構造（Discover / Implement / Verify）**
-  - Claude CodeのDynamic Workflowsと同様に、ワークフローをフェーズ単位で構成する
-  - 例：`Discover`（調査・設計）→ `Implement`（実装）→ `Verify`（検証）
-  - グラフをフェーズ単位で設計することで、進捗の可視性（F-14）が高まり、各フェーズ末で検証してから次に進める
-  - 各フェーズ内で必要なAgentを並列 or 直列で動かす
+  - 現行パイプラインがこの構造に対応する：設計（Discover）→ 実装（Implement）→
+    監査＋サンドボックス/ページ検証（Verify）。各フェーズ末で検証してから次に進む
+  - グラフ自体のフェーズ分割・フェーズ内並列は将来拡張（並列はF-03 Phase 2）
 
-- **タスク規模に応じた動員数の自動調整（コスト・速さ・品質を同時に最適化）**
-  - routerがタスク規模を判定し、動員するAgent数とモデルを動的に決める
-    - **小規模タスク（APIを1つ作る等）** → 3体・直列・Flash中心。速くて安い。非機能要件「5分以内」を死守
-    - **大規模タスク（システム全体の設計等）** → 多数・並列・Pro混在。遅いが高品質。デモの目玉
-  - 「賢く必要な分だけ動員する」ことで、無駄なトークン消費（=コスト）を抑える
-  - Claude CodeのDynamic Workflowsは1回938kトークン消費し「小タスクに使うとコスパが悪い」と公式に警告されている。Hiveはこれを**routerが自動で規模判断する**ことで解決＝差別化ポイント
+- **品質レベル（コスト・速さ・品質の調整。ユーザー選択＋自動判定）**
+  - ユーザーがUIで発注時に選択：**おまかせ（既定）／はやさ優先／品質優先**
+  - **おまかせ**＝routerが自動判定：重い発注（scale=heavy）とフルスタック（app）は
+    **最初からProで設計・実装**する。それ以外はバランス（Flash開始＋F-13交代）
+    - 根拠：Flashで2回失敗してからProに交代するより、最初からProの方が
+      速く・安く・高品質に着地する（E2E実測：app はFlashが2回失敗→Pro一発成功）
+  - **はやさ優先**＝Flashのみ・交代なし。試し打ち・コスト最小
+  - **品質優先**＝設計・実装とも最初からPro（交代の余地なし＝最初から最強）
+  - 選択結果（ラベル・使用モデル）はrouterイベントでUIに表示＝透明性の一部
+  - Claude CodeのDynamic Workflowsは1回938kトークン消費し「小タスクに使うとコスパが悪い」と公式に警告されている。Hiveは**規模に応じた自動調整＋ユーザー上書き**で解決＝差別化ポイント
 
 > **参考：Claude Code「Dynamic Workflows」との関係**
 > 2026年、Claude CodeにDynamic Workflows（`workflow`入力で発動、Phase構造＋多数Agent並列＋収束）が追加され、HiveのF-02/F-03とほぼ同方向の実装が実在することが確認された。CyberAgentの実運用コメントでも「単発サブエージェントとフルチーム構築の間のギャップを埋め、visibilityを失わず長時間実行を信頼できる」と評価されている。HiveはこれをGCP（ADK）上で実現し、かつドラクエ風可視化（F-14）と規模自動調整で差別化する。
@@ -213,11 +218,18 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
 - テスト失敗・レビューNGの場合、ループが自動的に implementer に差し戻し
 - この「自律的な修正サイクル」がClaude Codeと同様の動きをインフラレベルで実現する
 - **サンドボックス自己検証（正攻法として採用）**
-  - ADK 2.xの `AgentEngineSandboxCodeExecutor` / `BashTool` を使用
-  - **v2.1.0の新機能**：テンプレート・スナップショットからサンドボックスを作成できるため、毎回ゼロから環境構築せず高速に検証環境を立てられる
-  - implementerが生成したコードをサンドボックスで実際に実行
-  - 失敗ログをimplementerに食わせて自己修正させる
+  - **実装：uv隔離サンドボックス**（`uv run --no-project` でプロジェクトと隔離した
+    一時環境を作り、生成コード＋生成テストを実際にpytest実行）
+  - **環境変数の遮断**：生成コードにHiveの認証情報（GOOGLE_*等）を晒さないため、
+    サンドボックスへは実行に必要な最小限の環境変数のみ渡す。
+    ※ファイルシステムの完全隔離はコンテナ境界（Cloud Run化）で担保する
+  - `VerificationResult` のインターフェースを固定してあり、ADK公式の
+    `AgentEngineSandboxCodeExecutor` へ将来差し替え可能（要件v2.8で実態に整合）
+  - implementerが生成したコードをサンドボックスで実際に実行し、
+    失敗ログをimplementerに食わせて自己修正させる
   - LLMが提案・サンドボックスが判定する決定論的なオラクル構造
+  - LP/画面はpytestの代わりに決定論的ページ検証（webcheck：必須要素・実コンテンツ・
+    リンク切れ・API契約参照を機械チェック）を同じループに接続する
 - **検証役は修正しない原則（確定済み設計）**
   - tester・reviewer・security-reviewerはコードにパッチを当てず、「どの基準がなぜ落ちたか」の正確なレポートでimplementerに差し戻す
   - 修正責任をimplementer（およびF-13の交代先）に一元化することで、責任範囲が混ざらず、検証役のコンテキストも汚れない。現行実装はすでにこの方式＝変更不要
@@ -261,38 +273,23 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
   - `architecture` → designer
   - `fastapi` → implementer
   - `pytest` → tester
-  - `cloud-run` → devops
+  - `web-design` → web/app designer・implementer・frontend
 
 ### F-08｜Memory Store（経験の蓄積）（P1）
-- **Vertex AI Agent EngineのMemory Bank（公式機能）を使用**
-  - 短期記憶（Sessions）：会話ごとのコンテキスト・思考プロセス・履歴をTTL付きで保持
-  - 長期記憶（Memory Bank）：複数会話横断で成功・失敗パターンを永続保存
-- v1.xのFirestore自前実装は不要になったため廃止
+- **ReasoningBank方式の自前実装を採用**（Google Research論文 arXiv 2509.25140 ベース。
+  要件v2.8で実態に整合。当初案のAgent Engine Memory Bankは差し替え可能な将来移行先）
+  - 成功・失敗の両方から**再利用可能な教訓を蒸留**し、次の同種タスク開始時に
+    検索してプロンプトへ注入する（retrieve → 利用 → record → forget）
+  - **忘却（forget）**：TTLと件数上限で古い・過剰な記憶を整理し、
+    誤った教訓の固着を防ぐ（F-09 Reflectionの最小版を内蔵）
+  - 検索は依存ゼロのキーワード重なりスコア（決定論的・日本語2-gram対応）
+  - ストレージはJSONファイル。**本番（Cloud Run）ではGCSに永続化する（M8デプロイで対応）**。
+    インターフェースを固定してあり、Agent Engine Memory Bankへ差し替え可能
 - 保存する内容：
-  - タスクの成功条件・完了戦略
-  - よくある失敗とその原因
-  - コードベース固有の知識
-  - 過去の調査結果（重複調査を防ぐ）
-  - 他のAgentが学んだこと（集合知）
-
-- **WTFルール（全AgentのInstructionに追加）**
-  - Cursorの「黙って乗り越えるな」思想をAgent Instructionに仕込む
-  - タスク実行中に以下を発見したら成果物と一緒に`report`に含める：
-    - 詰まった箇所とその原因
-    - 想定と違った仕様・挙動
-    - 改善できると思ったプロセス
-  - 報告がMemory Bankに蓄積され、チーム全体の品質向上につながる
-
-- **MemoryEntryスキーマ**
-  ```python
-  class MemoryEntry(BaseModel):
-      task_id: str
-      agent_name: str
-      success_patterns: list[str]
-      failure_patterns: list[str]
-      wtf_reports: list[str]   # WTFルールで報告された内容
-      created_at: datetime
-  ```
+  - タスク種別ごとの成功パターン（何がうまくいったか）
+  - 失敗パターンと「次回の注意」（検証失敗・セキュリティ指摘の教訓）
+- 記録・想起はSSEイベント（memory_recall / memory_write）としてUIに可視化される
+  （「むかしの きおくを おもいだした」「ぼうけんのしょに きろくした」）
 
 - **AX（エージェント体験）設計（条件付きP1）**
   - Memory Bankの実装が完了し余裕があれば実装・説明軸として追加する
@@ -447,32 +444,33 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
 └───┬─────────┬─────────┬─────────┬────────────────┘
     │ A2A     │ A2A     │ A2A     │ A2A
     ▼         ▼         ▼         ▼
-┌────────┐┌──────────┐┌────────┐┌────────┐
-│designer││implementer││tester  ││devops  │ ...動的に追加可能
-│Agent   ││Agent     ││Agent   ││Agent   │
-└───┬────┘└───┬───────┘└────────┘└───┬────┘
-    │ MCP     │ MCP                  │ MCP
-    ▼         ▼                      ▼
+┌────────┐┌──────────┐┌────────┐┌────────┐┌─────────────────┐
+│designer││implementer││tester  ││frontend││security-reviewer│ ...動的に編成
+│Agent   ││Agent     ││Agent   ││Agent   ││Agent（Pro固定） │
+└───┬────┘└───┬───────┘└────────┘└────────┘└─────────────────┘
+    │ MCP     │ MCP
+    ▼         ▼
 ┌──────────────────────────────────────────┐
 │  GitHub / Cloud Storage / Cloud Run      │
 └──────────────────────────────────────────┘
                     ↑
           GitHub Actions (CI/CD)
 
-【Memory Layer（Vertex AI Agent Engine）】
+【Memory Layer（ReasoningBank・自前実装）】
 ┌──────────────────────────────────────────┐
-│  Agent Engine Memory Bank（公式機能）    │
-│  - 短期記憶（Sessions）：TTL付き会話履歴 │
-│  - 長期記憶（Memory Bank）：永続知識     │
-│  ↑↓ 各Agentがタスク前後に読み書き      │
+│  ReasoningBank（shared/memory.py）       │
+│  - 成功/失敗から教訓を蒸留して永続保存   │
+│  - retrieve→注入→record→forget(忘却)     │
+│  - 本番はGCS永続化（M8）。Agent Engine   │
+│    Memory Bankへ差し替え可能な設計       │
+│  ↑↓ Orchestratorがタスク前後に読み書き  │
 └──────────────┬───────────────────────────┘
                │ 非同期（タスク完了後に起動）
                ▼
 ┌──────────────────────────────────────────┐
 │  Reflection Agent（Dreaming相当・P2）    │
-│  - 複数セッションログを横断分析          │
-│  - 共通パターン発見・Memory整理・統合    │
-│  - 古い/重複Memoryを削除                │
+│  - 最小版（TTL/件数忘却）はF-08に内蔵済み│
+│  - 横断分析・統合の本格版は将来拡張      │
 └──────────────────────────────────────────┘
 ```
 
@@ -486,7 +484,7 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
 | エージェント間通信 | A2A Protocol（ADKネイティブ） | 最新技術 ✅ | - |
 | ツール接続 | MCP（GitHub MCP Server） | 最新技術 ✅ | - |
 | アプリ実行環境 | Cloud Run（Agent・フロントエンド全て統一） | 必須①アプリ実行 ✅ | - |
-| Memory Store | **Vertex AI Agent Engine Memory Bank**（公式機能） | - | Firestore自前→公式 |
+| Memory Store | **ReasoningBank**（論文ベース自前実装・本番はGCS永続化） | - | Memory Bankは将来差し替え先 |
 | Skills管理 | **ADK 2.x SkillToolset**（3層構造） | - | 自前→公式 |
 | フロントエンド | Next.js + Tailwind CSS | 任意 | - |
 | CI/CD | GitHub Actions + Workload Identity Federation | DevOps要素 ✅ | - |
@@ -506,18 +504,21 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
 
 ### 4.4 エージェント一覧
 
-| Agent名 | 役割 | SkillToolset | Phase |
+| Agent名 | 役割 | SkillToolset | 状態 |
 |---|---|---|---|
-| Orchestrator（女王蜂） | グラフワークフロー制御・router・Memory参照 | - | 1〜 |
-| designer | 仕様書・設計書・ディレクトリ構成の生成 | `architecture` | 1〜 |
-| implementer | コード生成（FastAPI等） + how_to_verify | `fastapi` | 1〜 |
-| tester | テストコード生成・実行・結果返却 | `pytest` | 1〜 |
-| reviewer | コード品質チェック・フィードバック生成 | `code-review` | 2〜 |
-| devops | Cloud Runデプロイ・CI/CD設定・URL返却 | `cloud-run` | 2〜 |
-| security-reviewer | セキュリティ監査（最上位モデル固定・パターンマッチ・ツール武装） | `security` | 2〜 |
-| reflection | セッションログ横断分析・Memory整理（Dreaming相当） | - | 3〜 |
+| Orchestrator（女王蜂） | グラフワークフロー制御・router・品質プラン・Memory読み書き | - | 実装済み |
+| designer（api/lp/app各種） | 設計仕様の生成（タスク種で差し替え） | `api-design` / `web-design` | 実装済み |
+| implementer | コード生成（FastAPI / HTML） + how_to_verify | `python-style` `fastapi` / `web-design` | 実装済み |
+| frontend | API契約に従う画面実装（appのみ・F-03契約原則） | `web-design` | 実装済み |
+| tester | テストコード生成（実行はサンドボックスが担当） | `pytest` `python-style` | 実装済み |
+| security-reviewer | セキュリティ監査（Pro固定・パターンマッチ併用） | `security` | 実装済み |
+| reflection | Memory横断分析・整理（最小版の忘却はF-08内蔵） | - | P2・将来 |
 
 > **security-reviewer のモデル方針**：他Agentと違い、品質担保のため必ずGemini Pro（最上位）を固定使用する。
+>
+> **非採用に確定したAgent（v2.8）**
+> - **reviewer（汎用コード品質レビュー）**：正確性はサンドボックス、安全性はsecurity-reviewerが機械的に担保済み。F-15の原則どおり「弱いレビュアーは安心感だけ与えて穴を見逃す」ため、汎用レビュアーは追加しない
+> - **devops（デプロイAgent）**：デプロイ（F-06）は決定論的な処理であり、LLMにやらせない方が確実・安全。Orchestratorのコード（$0・決定論的）として実装する。routerをLLMでなくコードにしたのと同じ設計哲学
 
 ---
 
@@ -538,19 +539,20 @@ Step 3: SequentialAgentが各Agentを順次呼び出し（Phase 1）
         implementer → FastAPIコード + how_to_verify を生成
         tester      → pytestコードを生成
 
-Step 4: LoopAgentがフィードバックループを制御（Phase 2〜）
-        → reviewer がNGなら implementer に差し戻し
-        → OKになるまで最大3回リトライ
+Step 4: 監査と検証の自走ループ（実装済み）
+        → security-reviewer が監査（Critical検出で差し戻し）
+        → サンドボックスで実際にpytest実行（失敗ログを添えて差し戻し）
+        → 最大3回。バランスプランは最終試行でPro交代（F-13）
 
-Step 5: devopsがGitHubにPR自動作成（Phase 2〜）
-        → GitHub ActionsでCI/CD実行
-        → Cloud Runにデプロイ
+Step 5: OrchestratorがプレビューデプロイしてURL返却（F-06・M8）
+        → 生成物を Cloud Run にデプロイ（決定論的処理・devops Agentは使わない）
+        → GitHub PR連携（F-05）はその後段
 
 Step 6: ユーザーに完成URLを返却
         「✅ デプロイ完了！ https://xxx.run.app」
 
-Step 7: （非同期）Memory Bankに経験を記録
-        → 次回タスク開始時に参照して品質向上
+Step 7: （非同期）ReasoningBankに教訓を記録・忘却を実行
+        → 次回タスク開始時に想起して品質向上
 ```
 
 ---
@@ -603,7 +605,7 @@ Step 7: （非同期）Memory Bankに経験を記録
 | 課題へのアプローチ力 | 「個人が開発チームを持てる民主化」＋「Antigravityのブラックボックスを透明化する」＋ハーネスエンジニアリングの実装というストーリー |
 | ユーザビリティ | 自然言語で発注できるチャットUI。専門知識不要 |
 | 実用性・体験価値 | 数分でデプロイ＋使うたびに賢くなる＋AIの協働をRPGで観察できる（F-14）＋セキュリティ監査込み |
-| 実装力 | ADK 2.x + A2A + MCP + SkillToolset + Memory Bank + Rewind木探索 + モデル格上げ + 多層セキュリティの最先端スタック |
+| 実装力 | ADK 2.x + A2A + MCP + SkillToolset + ReasoningBank + 品質レベル + モデル格上げ + 多層セキュリティの最先端スタック |
 
 ---
 
@@ -613,61 +615,46 @@ Step 7: （非同期）Memory Bankに経験を記録
 hive-agents/
 ├── agents/
 │   ├── orchestrator/
-│   │   ├── workflow.py       # WorkflowAgent定義（グラフ・ノード・エッジ）
-│   │   ├── router.py         # Function Node（規模判定・条件分岐ロジック）
-│   │   ├── schemas.py        # AgentPlan・各出力スキーマ（Pydantic）
-│   │   ├── main.py           # uvicorn起動エントリポイント
-│   │   ├── Dockerfile
-│   │   └── pyproject.toml    # uvで依存管理
-│   ├── designer/
-│   │   ├── agent.py          # LlmAgent定義
-│   │   ├── skills/           # SkillToolset（L1/L2/L3）
-│   │   │   └── architecture/
-│   │   │       ├── meta.yaml      # L1メタデータ（〜100トークン）
-│   │   │       ├── instruction.md # L2インストラクション
-│   │   │       └── resources/     # L3リソース
-│   │   ├── main.py
-│   │   ├── Dockerfile
-│   │   └── pyproject.toml
-│   ├── implementer/          # skills/fastapi/ を含む
-│   ├── tester/               # skills/pytest/ を含む
-│   ├── reviewer/             # Phase 2〜（コード品質レビュー）
-│   ├── security-reviewer/    # Phase 2〜（F-15・skills/security/ を含む・モデルはPro固定）
-│   ├── devops/               # Phase 2〜 skills/cloud-run/ を含む
-│   └── reflection/           # Phase 3〜（Dreaming相当）
+│   │   ├── workflow.py       # グラフ定義（タスク種＋品質レベルでパイプラインを組む）
+│   │   ├── router.py         # Function Node（種別・規模判定。コスト$0）
+│   │   ├── schemas.py        # 各Agentの出力スキーマ（Pydantic）
+│   │   └── server.py         # SSE配信・監査/検証ループ・品質プラン（uvicorn起動）
+│   ├── designer/  implementer/  tester/   # APIパイプライン（各 agent.py + A2A用 main.py）
+│   ├── web/                  # LPパイプライン（web designer / web implementer）
+│   ├── app/                  # フルスタック（app designer / frontend / 責任範囲note）
+│   └── security_reviewer/    # F-15 監査（Pro固定）
 │
-├── shared/                   # Agent共通モジュール
-│   ├── memory.py             # Agent Engine Memory Bank の読み書きラッパー
-│   ├── escalation.py         # F-13 モデル格上げ交代ロジック
-│   └── security_patterns.yaml # F-15 決定論的パターンマッチ用ルール
+├── shared/                   # 共通モジュール（ここが品質装置の本体）
+│   ├── memory.py             # F-08 ReasoningBank（教訓の蒸留・想起・忘却）
+│   ├── sandbox.py            # F-04 uv隔離サンドボックス（環境変数遮断つき）
+│   ├── webcheck.py           # LP/画面の決定論的検証＋API契約チェック
+│   ├── security_patterns.py  # F-15 第1層・決定論的パターンマッチ
+│   ├── skills.py             # F-07 SkillToolset共有カタログのローダー
+│   ├── models.py             # FLASH/PRO のモデルID集約
+│   └── telemetry.py          # OTel GenAIトレース（F-14）
+│
+├── skills/                   # スキル共有カタログ（全Agentが名前で装着＝知識の一貫性）
+│   ├── api-design/ fastapi/ pytest/ python-style/ security/ web-design/
 │
 ├── frontend/                 # Next.js + Tailwind CSS
-│   ├── app/
-│   │   ├── page.tsx          # メインチャット画面
-│   │   └── api/stream/route.ts  # SSEエンドポイント
-│   ├── components/
-│   │   ├── ChatInput.tsx
-│   │   ├── AgentProgressPanel.tsx
-│   │   └── ResultDisplay.tsx
-│   ├── game/                 # F-14 ドラクエ風可視化（Phaser.js）
-│   ├── Dockerfile            # Cloud Runデプロイ用
-│   └── package.json
+│   └── app/
+│       ├── page.tsx          # タイムライン表示（チャットUI）
+│       ├── rpg/              # F-14 ドラクエ風可視化（Phaser.js）
+│       ├── lib/quest.ts      # SSE共有ストア（遷移しても途切れない・履歴保存）
+│       └── components/       # 履歴サイドバー等
 │
-├── .github/
-│   └── workflows/
-│       ├── deploy-agents.yml     # Cloud Run自動デプロイ（Agent群）
-│       └── deploy-frontend.yml   # Cloud Run自動デプロイ（フロントエンド）
-│
-├── Makefile                  # ローカル全Agent起動・停止コマンド
-├── compose.yaml              # ローカルで全Agentを同時起動（Docker Compose）
+├── evals/                    # ルータgolden＋実パイプラインのサンドボックス採点
+├── tests/                    # 単体テスト（google-adk非依存・隔離実行）
+├── scripts/                  # M0疎通・M1実行・A2A一括起動
+├── Makefile                  # test / eval / serve-orchestrator / ui 等
 ├── REQUIREMENTS.md
 └── README.md
 ```
 
-> **構成の補足**
-> - Memory Bank（F-08）はAgent Engineの公式機能を使うため、自前の`memory/`実装フォルダは不要。読み書きラッパーのみ`shared/memory.py`に置く。
-> - Python依存管理は **uv**（`pyproject.toml`）を使用。各Agentは独立したサービスなのでAgentごとに依存を管理。
-> - ローカルでは`compose.yaml`で全Agentを同時起動し、A2A通信を検証する。
+> **構成の補足（v2.8で実態に整合）**
+> - スキルは**共有カタログ方式**（skills/直下）。全Agentが同じ知識ベースを名前で装着するため、生成物の一貫性に有利（当初案のAgentごと分散より良い構造と判断）
+> - pyprojectは**リポジトリ直下に1つ**（agents/sharedを単一パッケージとして管理）。Cloud Run化（M8）ではOrchestrator＋フロントの2サービス構成から始め、Agent個別サービス化はA2A本番化と同時に行う
+> - Dockerfile・compose.yaml・.github/workflows は**M8（本番デプロイ）で追加**する
 
 ---
 
@@ -701,7 +688,7 @@ hive-agents/
 - **プロジェクトID**：`hive-dev-2026`
 - **デフォルトリージョン**：`asia-northeast1`（東京）
 - **Artifact Registry**：`hive-agents`（Dockerリポジトリ）
-- **Vertex AI Agent Engine**：Memory Bank有効化
+- **Vertex AI Agent Engine**：Memory Bank有効化（※現在は未使用。F-08はReasoningBank採用） 
 
 ### 有効化済みAPI
 ```
@@ -763,7 +750,7 @@ iam.googleapis.com
 | プロダクト名 | Hive | Orchestrator＝女王蜂・Agent＝働き蜂の比喩が構造と一致 |
 | ADKバージョン | **ADK 2.x 最新安定版に追随（現在 2.2.0）** | 2026/5/19にGA化。セキュリティ修正を取り込みつつ最新グラフ機能をフル活用できる |
 | Agent組成ロジック | ADK 2.x WorkflowAgent + router（Function Node） | プロンプト任せより決定論的・ハルシネーション防止・コスト$0 |
-| 動員数の自動調整 | routerがタスク規模を判定し動員数・モデルを変える | 小タスクは安く速く、大タスクは高品質。コスト・速さ・品質を同時最適化 |
+| 品質レベル | ユーザー選択（おまかせ/はやさ優先/品質優先）＋おまかせ時はrouterが自動判定。重い発注・appは最初からPro | Flashで失敗を消費してから交代するより、最初からProが速く・安く・高品質（E2E実測に基づく） |
 | ワークフロー構造 | Phase（Discover/Implement/Verify）単位で構成 | 可視性が高まり、各フェーズ末で検証してから次へ進める。Dynamic Workflowsと同方向 |
 | チャレンジ枠 | Rewindを使った行動の木探索（F-12） | 審査の「意外性」に直接訴求。ADK 2.xのRewind primitiveを応用 |
 | A2A実装方式 | ADKネイティブ（`to_a2a()` / `RemoteA2aAgent`） | 手動HTTP比でIAM統合・プロトコル管理が自動化される |
@@ -774,9 +761,10 @@ iam.googleapis.com
 | 品質の核の優先度 | サンドボックス検証/交代/セキュリティをMUSTに格上げ | 成果物の品質にこだわるため。品質の劇的な瞬間が可視化の見せ場にもなり一石二鳥 |
 | 可視化の実装方式 | データ(SSEイベント)と描画(Phaser)を分離。最小可視化をM3、RPGをM7 | やり取りの可視化を目玉にしつつ、RPG描画が間に合わなくても機能が残る |
 | F-14のサウンド | 実装しない（Tone.js対象外） | 工数を可視化の本体＝エージェント間のやり取りの表現に集中させる |
-| Memory Store | Vertex AI Agent Engine Memory Bank（公式機能） | Firestore自前実装より工数削減・公式サポート |
-| Skills管理 | ADK 2.x SkillToolset（3層構造） | コンテキスト約90%削減・公式パターンに乗れる |
-| フィードバック検証 | サンドボックス自己検証（BashTool） | LLM提案・サンドボックス判定の決定論的オラクル |
+| Memory Store | ReasoningBank（論文ベース自前実装・忘却つき・本番はGCS永続化） | 教訓の蒸留＋忘却まで自分で設計でき審査で語れる。Memory Bankはインターフェース互換の将来差し替え先 |
+| Skills管理 | ADK 2.x SkillToolset（3層構造・共有カタログ方式） | コンテキスト約90%削減・全Agentが同じ知識を参照し生成物が一貫する |
+| フィードバック検証 | uv隔離サンドボックス（環境変数遮断つき）。公式Executorは将来差し替え先 | LLM提案・サンドボックス判定の決定論的オラクル。生成コードに認証情報を晒さない |
+| reviewer/devops Agent | 採用しない | 汎用reviewerは弱い安心感の温床（F-15）。デプロイは決定論的コードで実装（LLMにやらせない） |
 | 品質向上の仕組み | エージェント交代＝モデル格上げ（Flash→Pro）（F-13） | 失敗の主因はモデル能力不足。根本原因を直接叩くのが最も確実・実装容易・コスト効率も両立 |
 | 検証役の責任分離 | tester/reviewer/security-reviewerは修正せずレポートで差し戻し。修正はimplementerに一元化（F-04） | 責任範囲が混ざらず検証役のコンテキストが汚れない。F-13交代とも整合 |
 | 自律git操作の安全装置 | `hive/`ブランチのみpush可・main直push禁止。マージは検証ゲート（全自動）or 人間（承認モード）で、Hive自身は直接マージしない（F-05） | 取り消しコストが高い操作は権限レベルで構造的に不可能にする。無人実行の前提条件 |
@@ -791,6 +779,7 @@ iam.googleapis.com
 ---
 
 *作成日：2026年5月*
+*更新日：2026年6月11日（v2.8・§0参照）：実装監査を経て要件を実態に整合（ReasoningBank・uvサンドボックス＋環境変数遮断・リポジトリ構成・reviewer/devops非採用）＋品質レベル（おまかせ/はやさ優先/品質優先）導入*
 *更新日：2026年6月10日（v2.4〜v2.7・§0参照）：ADK 2.2.0対応（v2.4）＋品質要件の強化（受け入れ基準の上流定義・検証役の責任分離・レビュー出力フォーマット）（v2.5）＋自動化・無人実行の要件追加（git安全装置・トリガー発注・コスト暴走対策）（v2.6）＋実行モードとプレビューデプロイの確定（v2.7）。※冒頭のvX.X（要件改訂）と以下の更新履歴のvX.X（旧採番）は系列が異なる点に注意*
 *更新日：2026年5月30日（v2.7）*
 *変更内容（v2.7）：実現可能性レビューを経て開発計画を実態に合わせて確定。① 6章フェーズを M0〜M8 の垂直スライス（常にデモ可能・提出可能ラインはM3）に再構成。② A2A独立デプロイを最初からM2へ後ろ倒し（頭脳のバグとA2Aのバグを分離）、透明性の可視化をM3へ前倒し。③ 対象タスク種を「FastAPI CRUD 1本から（router/skillは差し込み式・複数対応はM8拡張）」に確定（F-02）。④ 品質の核（サンドボックス検証F-04・交代F-13・セキュリティF-15）をMUSTに格上げ。⑤ F-14のサウンド(Tone.js)を廃止し、データ(SSEイベント)と描画(Phaser)を分離してやり取りの可視化を目玉に集中。⑥ 13章 確定事項に上記を追記。なおADK 2.1 GA・SkillToolset・Rewind・AgentEngineSandboxCodeExecutor・Antigravity 2.0・Gemini CLI停止(6/18)はWeb調査で事実確認済み（v2.6の前提は維持）。*
