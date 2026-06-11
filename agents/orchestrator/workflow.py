@@ -17,10 +17,10 @@ import os
 from google.adk import Workflow
 from google.adk.agents.base_agent import BaseAgent
 
-from agents.designer.agent import designer_agent
-from agents.implementer.agent import implementer_agent
+from agents.designer.agent import make_designer
+from agents.implementer.agent import make_implementer
 from agents.orchestrator.router import route_task
-from agents.tester.agent import tester_agent
+from agents.tester.agent import make_tester
 
 # A2Aモード時の各Agentサービスのポート（agents/<name>/main.py の既定と一致）
 _A2A_PORTS = {"designer": 8001, "implementer": 8002, "tester": 8003}
@@ -49,10 +49,43 @@ def _node(local_agent: BaseAgent, name: str) -> BaseAgent:
     return local_agent
 
 
-def build_workflow() -> Workflow:
-    designer = _node(designer_agent, "designer")
-    implementer = _node(implementer_agent, "implementer")
-    tester = _node(tester_agent, "tester")
+def build_workflow(task_type: str = "api") -> Workflow:
+    """タスク種別に応じたパイプラインのグラフを組む（F-02 差し込み式）。
+
+    ルーティング判断は呼び出し側が router.classify で行い（コスト$0・決定論的）、
+    ここでは該当する直列パイプラインを返す。
+    - api: designer → implementer → tester（A2A切り替え対応）
+    - lp : web designer → web implementer（M8。当面プロセス内実行のみ）
+    """
+    # 注意：グラフのノードは必ず「呼び出しごとに新しいAgentインスタンス」を使う。
+    # Workflow はAgentにモード等の状態を持たせるため、インスタンスを複数のグラフで
+    # 使い回すと2つ目以降の構築が "mode='chat'" の検証エラーで落ちる。
+    if task_type == "app":
+        # フルスタック：設計だけapp版に差し替え、実装・テストはAPI版を再利用。
+        # frontend（画面担当）はバックエンド検証の通過後に orchestrator が起動する
+        from agents.app.agent import make_app_designer, make_app_implementer
+
+        return Workflow(
+            name="hive_orchestrator",
+            description="自然言語の発注をフルスタック設計→API実装→テストで処理する（画面は後段）",
+            edges=[
+                ("START", route_task, make_app_designer(), make_app_implementer(), make_tester()),
+            ],
+        )
+    if task_type == "lp":
+        # 遅延import：APIパイプラインだけ使う場面で余計な依存を引かない
+        from agents.web.agent import make_web_designer, make_web_implementer
+
+        return Workflow(
+            name="hive_orchestrator",
+            description="自然言語の発注をWebページパイプライン(designer→implementer)で処理する",
+            edges=[
+                ("START", route_task, make_web_designer(), make_web_implementer()),
+            ],
+        )
+    designer = _node(make_designer(), "designer")
+    implementer = _node(make_implementer(), "implementer")
+    tester = _node(make_tester(), "tester")
     return Workflow(
         name="hive_orchestrator",
         description="自然言語の発注をAPIパイプライン(designer→implementer→tester)で処理する",

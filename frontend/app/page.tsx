@@ -12,6 +12,7 @@ const API = process.env.NEXT_PUBLIC_HIVE_API ?? "http://localhost:8000";
 const JOB: Record<string, { emoji: string; label: string; ring: string }> = {
   designer: { emoji: "🧙", label: "設計担当", ring: "ring-violet-400" },
   implementer: { emoji: "⚔️", label: "実装担当", ring: "ring-amber-400" },
+  frontend: { emoji: "🎨", label: "画面担当", ring: "ring-teal-400" },
   tester: { emoji: "⛪", label: "テスト担当", ring: "ring-sky-400" },
   security_reviewer: { emoji: "🛡️", label: "セキュリティ監査", ring: "ring-rose-400" },
 };
@@ -29,12 +30,13 @@ type SecurityFinding = {
 
 type TimelineItem =
   | { id: number; kind: "task"; task: string }
-  | { id: number; kind: "router"; taskType: string; scale: string }
+  | { id: number; kind: "router"; taskType: string; scale: string; party: string[] }
   | { id: number; kind: "recall"; lessons: string[] }
   | { id: number; kind: "thinking"; agent: string; role: string }
   | { id: number; kind: "output"; agent: string; role: string; text: string }
-  | { id: number; kind: "verifying" }
-  | { id: number; kind: "verify"; passed: boolean; output: string }
+  | { id: number; kind: "handoff"; from: string; to: string; item: string; detail: string }
+  | { id: number; kind: "verifying"; mode: string }
+  | { id: number; kind: "verify"; passed: boolean; output: string; mode: string }
   | { id: number; kind: "securing" }
   | {
       id: number;
@@ -57,9 +59,22 @@ function summarize(agent: string, text: string) {
   try {
     const o = JSON.parse(text);
     if (agent === "designer")
-      return { title: o.overview as string, list: (o.endpoints as string[]) ?? [] };
+      return {
+        title: o.overview as string,
+        list: (o.endpoints as string[]) ?? (o.sections as string[]) ?? [],
+      };
     if (agent === "implementer")
-      return { title: "実装が完成した", verify: o.how_to_verify as string, code: o.code as string };
+      return {
+        title: o.html ? "Webページが完成した" : "実装が完成した",
+        verify: o.how_to_verify as string,
+        code: (o.code ?? o.html) as string,
+      };
+    if (agent === "frontend")
+      return {
+        title: "画面が完成した",
+        verify: o.how_to_verify as string,
+        code: o.html as string,
+      };
     if (agent === "tester")
       return { title: o.summary as string, code: o.test_code as string };
     if (agent === "security_reviewer")
@@ -103,7 +118,13 @@ export default function Home() {
 
     on("task_received", (d) => push({ id: nextId(), kind: "task", task: d.task }));
     on("router", (d) =>
-      push({ id: nextId(), kind: "router", taskType: d.task_type, scale: d.scale }),
+      push({
+        id: nextId(),
+        kind: "router",
+        taskType: d.task_type,
+        scale: d.scale,
+        party: ((d.party as { agent: string }[]) ?? []).map((p) => labelOf(p.agent)),
+      }),
     );
     on("memory_recall", (d) =>
       push({ id: nextId(), kind: "recall", lessons: d.lessons ?? [] }),
@@ -123,6 +144,16 @@ export default function Home() {
         ];
       });
     });
+    on("handoff", (d) =>
+      push({
+        id: nextId(),
+        kind: "handoff",
+        from: d.from_agent,
+        to: d.to_agent,
+        item: d.item ?? "",
+        detail: d.detail ?? "",
+      }),
+    );
     on("security_start", () => push({ id: nextId(), kind: "securing" }));
     on("security_result", (d) => {
       setItems((prev) => {
@@ -139,7 +170,9 @@ export default function Home() {
         ];
       });
     });
-    on("verify_start", () => push({ id: nextId(), kind: "verifying" }));
+    on("verify_start", (d) =>
+      push({ id: nextId(), kind: "verifying", mode: d.mode ?? "pytest" }),
+    );
     on("verify_result", (d) => {
       setItems((prev) => {
         const filtered = prev.filter((it) => it.kind !== "verifying");
@@ -150,6 +183,7 @@ export default function Home() {
             kind: "verify",
             passed: String(d.passed) === "true",
             output: d.output,
+            mode: d.mode ?? "pytest",
           },
         ];
       });
@@ -213,7 +247,7 @@ export default function Home() {
           value={task}
           onChange={(e) => setTask(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && start()}
-          placeholder="例: 在庫管理のCRUD APIを作って"
+          placeholder="例: 在庫管理のCRUD APIを作って／喫茶店のおしゃれなLPを作って"
           disabled={running}
         />
         <button
@@ -270,6 +304,9 @@ function renderItem(it: TimelineItem) {
       return (
         <div className="text-center text-xs text-neutral-500">
           ⚙️ ルーター判定：種別 <b>{it.taskType}</b> / 規模 <b>{it.scale}</b> → はたらきバチを編成
+          {it.party.length > 0 && (
+            <span className="ml-1">（{it.party.join("・")}）</span>
+          )}
         </div>
       );
     case "recall":
@@ -336,6 +373,13 @@ function renderItem(it: TimelineItem) {
         </Card>
       );
     }
+    case "handoff":
+      return (
+        <div className="text-center text-xs text-neutral-500">
+          🤝 <b>{labelOf(it.from)}</b> が <b>{labelOf(it.to)}</b> に {it.item}を渡した
+          {it.detail && <span className="ml-1 opacity-70">（{it.detail.slice(0, 40)}）</span>}
+        </div>
+      );
     case "securing":
       return (
         <Card>
@@ -411,7 +455,9 @@ function renderItem(it: TimelineItem) {
             <span className="mt-1 text-[10px] text-neutral-500">けんしょう</span>
           </div>
           <div className="flex items-center text-sm text-neutral-500">
-            サンドボックスで実際に起動してテスト中
+            {it.mode === "page"
+              ? "ページが正しくできているか機械チェック中"
+              : "サンドボックスで実際に起動してテスト中"}
             <span className="ml-1 inline-flex animate-pulse">…</span>
           </div>
         </Card>
@@ -426,10 +472,18 @@ function renderItem(it: TimelineItem) {
           }`}
         >
           <div className="font-semibold">
-            {it.passed ? "🧪✅ サンドボックス検証：テスト通過（コードは実際に動く）" : "🧪❌ サンドボックス検証：テスト失敗"}
+            {it.mode === "page"
+              ? it.passed
+                ? "🧪✅ ページ検証：必須要素・リンク・実コンテンツOK"
+                : "🧪❌ ページ検証：問題を検出"
+              : it.passed
+                ? "🧪✅ サンドボックス検証：テスト通過（コードは実際に動く）"
+                : "🧪❌ サンドボックス検証：テスト失敗"}
           </div>
           <details className="mt-1">
-            <summary className="cursor-pointer text-xs opacity-70">pytest の出力</summary>
+            <summary className="cursor-pointer text-xs opacity-70">
+              {it.mode === "page" ? "チェック結果" : "pytest の出力"}
+            </summary>
             <pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-neutral-950 p-3 text-[11px] text-neutral-100">
               {it.output}
             </pre>

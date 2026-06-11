@@ -29,14 +29,17 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from agents.implementer.agent import implementer_agent, make_implementer
+from agents.app.agent import frontend_agent, make_app_implementer, make_frontend
+from agents.implementer.agent import make_implementer
 from agents.orchestrator.router import classify
 from agents.orchestrator.workflow import build_workflow
 from agents.security_reviewer.agent import security_reviewer_agent
 from agents.tester.agent import tester_agent
+from agents.web.agent import make_web_implementer
 from shared.memory import ReasoningBank, render_memories
 from shared.models import PRO
 from shared.sandbox import VerificationResult, verify_fastapi
+from shared.webcheck import check_frontend, check_web
 from shared.security_patterns import (
     SecurityFinding,
     SecurityReport,
@@ -55,6 +58,25 @@ def _field(json_text: str | None, key: str) -> str:
     except (json.JSONDecodeError, AttributeError):
         return ""
 
+
+def _list_field(json_text: str | None, key: str) -> list[str]:
+    """Agent出力のJSONテキストからリストフィールドを安全に取り出す。"""
+    if not json_text:
+        return []
+    try:
+        value = json.loads(json_text).get(key)
+        return [str(v) for v in value] if isinstance(value, list) else []
+    except (json.JSONDecodeError, AttributeError):
+        return []
+
+
+def _page_reason(output: str) -> str:
+    """ページ検証の出力から差し戻し理由の1行を取り出す。"""
+    for line in output.splitlines():
+        if line.startswith("- "):
+            return line[2:][:120]
+    return "ページ検証NG"
+
 APP_NAME = "hive-orchestrator"
 DEFAULT_TASK = "タスク管理のCRUD APIをFastAPIで作って"
 
@@ -62,6 +84,7 @@ DEFAULT_TASK = "タスク管理のCRUD APIをFastAPIで作って"
 AGENT_ROLE = {
     "designer": "設計",
     "implementer": "実装",
+    "frontend": "画面実装",
     "tester": "テスト",
     "security_reviewer": "セキュリティ監査",
 }
@@ -75,6 +98,38 @@ def _sse(event_type: str, **payload) -> dict:
     """SSEの1イベントを EventSourceResponse 形式に整える。"""
     return {"event": event_type, "data": json.dumps(payload, ensure_ascii=False)}
 
+
+# タスク種別ごとの実行順（F-02・差し込み式）。handoff の生成と修正ループの分岐に使う。
+# app のグラフ部分は api と同じ（frontend はバックエンド検証の通過後に別フェーズで起動）
+_PIPELINES = {
+    "api": ["designer", "implementer", "tester"],
+    "lp": ["designer", "implementer"],
+    "app": ["designer", "implementer", "tester"],
+}
+# 編成（F-02 動的エージェント組成）。routerイベントに載せ、UIがパーティ表示に使う
+_PARTY = {
+    "api": ["designer", "implementer", "tester"],
+    "lp": ["designer", "implementer"],
+    "app": ["designer", "implementer", "frontend", "tester"],
+}
+# 受け渡すもの（item）と、受け手に伝える内容を抜き出すフィールド
+_HANDOFF_ITEMS = {
+    "api": {
+        "designer": ("せっけいしょ", "overview"),
+        "implementer": ("かんせいコード", "how_to_verify"),
+    },
+    "lp": {
+        "designer": ("デザインしようしょ", "style_direction"),
+    },
+    "app": {
+        "designer": ("せっけいしょ", "overview"),
+        "implementer": ("かんせいコード", "how_to_verify"),
+    },
+}
+# implementer の成果物が入るフィールド名
+_RESULT_KEY = {"api": "code", "lp": "html", "app": "code"}
+# F-13 交代時に使う implementer のファクトリ
+_IMPL_FACTORY = {"api": make_implementer, "lp": make_web_implementer, "app": make_app_implementer}
 
 MAX_ATTEMPTS = int(os.environ.get("HIVE_MAX_ATTEMPTS", "3"))
 # デモ/テスト用：最初の N 回の検証を強制的に失敗扱いにし、修正ループを観察できる。
@@ -117,6 +172,25 @@ async def _verify(code: str, test_code: str, attempt: int) -> VerificationResult
     return result
 
 
+def _handoff_events(author: str, text: str, task_type: str) -> list[dict]:
+    """author の成果が出た瞬間に「次の担当への受け渡し」を表すイベント列を作る。
+
+    タスクが渡った瞬間に次Agentの agent_start を流すことで、
+    UIは実際のLLM待ち時間を「考えている」演出として見せられる（F-14）。
+    """
+    pipeline = _PIPELINES[task_type]
+    items = _HANDOFF_ITEMS[task_type]
+    if author not in items:
+        return []
+    nxt = pipeline[pipeline.index(author) + 1]
+    item, key = items[author]
+    detail = _field(text, key)[:80]
+    return [
+        _sse("handoff", from_agent=author, to_agent=nxt, item=item, detail=detail),
+        _sse("agent_start", agent=nxt, role=AGENT_ROLE.get(nxt, ""), detail=detail),
+    ]
+
+
 def _numbered(code: str) -> str:
     """監査用にコードへ行番号を振る（指摘の line と突き合わせるため）。"""
     return "\n".join(f"{i:4d} | {line}" for i, line in enumerate(code.splitlines(), start=1))
@@ -153,7 +227,16 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
     yield _sse("task_received", task=task)
     decision = classify(task)
     task_type = decision["task_type"]
-    yield _sse("router", task_type=task_type, scale=decision["scale"])
+    # 編成（F-02 動的エージェント組成）：このタスクで働くAgentをUIに知らせる
+    party = list(_PARTY[task_type])
+    if _SECURITY != "0":
+        party.append("security_reviewer")
+    yield _sse(
+        "router",
+        task_type=task_type,
+        scale=decision["scale"],
+        party=[{"agent": a, "role": AGENT_ROLE.get(a, "")} for a in party],
+    )
 
     # 経験の想起（F-08）：同種タスクの教訓を検索し、タスク文の先頭に注入する
     memories = _bank.retrieve(task, task_type)
@@ -164,11 +247,14 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
     outputs: dict[str, str] = {}
     result: VerificationResult | None = None
     try:
-        # 試行1：WorkflowAgent グラフ（router→designer→implementer→tester）
-        runner = InMemoryRunner(agent=build_workflow(), app_name=APP_NAME)
+        # 試行1：WorkflowAgent グラフ（タスク種別に応じたパイプライン・F-02）
+        runner = InMemoryRunner(agent=build_workflow(task_type), app_name=APP_NAME)
         session = await runner.session_service.create_session(app_name=APP_NAME, user_id="ui")
         message = types.Content(role="user", parts=[types.Part(text=base_prompt)])
-        last_author: str | None = None
+        # 最初の担当には今この瞬間にタスクが渡る。以降は handoff が次の開始を知らせる
+        yield _sse(
+            "agent_start", agent="designer", role=AGENT_ROLE["designer"], detail=task[:60]
+        )
         with agent_span("hive.workflow", operation="invoke_agent", **decision):
             async for event in runner.run_async(
                 user_id="ui", session_id=session.id, new_message=message
@@ -180,27 +266,30 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                 if not author or not text:
                     continue
                 outputs[author] = text
-                if author != last_author:
-                    yield _sse("agent_start", agent=author, role=AGENT_ROLE.get(author, ""))
-                    last_author = author
                 yield _sse("agent_output", agent=author, role=AGENT_ROLE.get(author, ""), text=text)
+                for handoff_ev in _handoff_events(author, text, task_type):
+                    yield handoff_ev
 
         design = outputs.get("designer", "")
+        result_key = _RESULT_KEY[task_type]
+        has_tester = "tester" in _PIPELINES[task_type]
 
         async def _fix(next_attempt: int, headline: str, failure_block: str) -> AsyncIterator[dict]:
-            """失敗を implementer に差し戻して実装とテストを作り直す（F-04/F-13）。
+            """失敗を implementer に差し戻して作り直す（F-04/F-13）。
 
             監査・検証役は修正しない原則：レポートを渡し、修正は implementer が行う。
             """
             yield _sse("retry", attempt=next_attempt, max=MAX_ATTEMPTS, reason=headline)
             # F-13 交代：最終試行はモデルを格上げ（Flash→Pro）した新インスタンスに交代
-            implementer = implementer_agent
+            factory = _IMPL_FACTORY[task_type]
             if next_attempt == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
                 yield _sse("escalation", agent="implementer", to_model=PRO)
-                implementer = make_implementer(PRO)
+                implementer = factory(PRO)
+            else:
+                implementer = factory()
             fix_prompt = (
                 f"{base_prompt}\n\n[設計]\n{design}\n\n"
-                f"[前回の実装]\n{_field(outputs.get('implementer'), 'code')}\n\n"
+                f"[前回の実装]\n{_field(outputs.get('implementer'), result_key)}\n\n"
                 f"{failure_block}\n\n"
                 "上記の問題を必ず修正した、完全に動作する実装を作り直してください。"
             )
@@ -209,7 +298,16 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                 yield ev
             if impl_out.get("text"):
                 outputs["implementer"] = impl_out["text"]
-            # 新しい実装に合わせてテストも作り直す
+            if not has_tester:
+                return
+            # 新しい実装に合わせてテストも作り直す（受け渡しも可視化する）
+            yield _sse(
+                "handoff",
+                from_agent="implementer",
+                to_agent="tester",
+                item="しゅうせいした コード",
+                detail=_field(outputs.get("implementer"), "how_to_verify")[:80],
+            )
             test_out: dict = {}
             async for ev in _invoke(tester_agent, outputs["implementer"], test_out):
                 yield ev
@@ -219,9 +317,9 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
         # 監査→検証→失敗なら修正、の自走ループ（F-04/F-15・最大 MAX_ATTEMPTS 回）
         sec_report: SecurityReport | None = None
         for attempt in range(1, MAX_ATTEMPTS + 1):
-            code = _field(outputs.get("implementer"), "code")
+            code = _field(outputs.get("implementer"), result_key)
             test_code = _field(outputs.get("tester"), "test_code")
-            if not (code and test_code):
+            if not code or (has_tester and not test_code):
                 break
 
             # --- F-15 セキュリティ監査（implementer の出力直後・サンドボックスの前）---
@@ -240,11 +338,17 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                 llm_review: SecurityReport | None = None
                 if _SECURITY != "pattern":
                     # 第2層：security-reviewer（Gemini Pro 固定・implementer とは別個体）
+                    if task_type == "lp":
+                        audit_prompt = (
+                            "以下のHTMLページを監査してください（行番号付き・file_pathは index.html）。"
+                            "観点：XSS・危険なインラインscript・外部リソースの読み込み・"
+                            "秘密情報の混入・フォームの送信先。\n\n"
+                        )
+                    else:
+                        audit_prompt = "以下の実装コードを監査してください（行番号付き）。\n\n"
                     sec_out: dict = {}
                     async for ev in _invoke(
-                        security_reviewer_agent,
-                        "以下の実装コードを監査してください（行番号付き）。\n\n" + _numbered(code),
-                        sec_out,
+                        security_reviewer_agent, audit_prompt + _numbered(code), sec_out
                     ):
                         yield ev
                     llm_review = _parse_security(sec_out.get("text"))
@@ -267,26 +371,99 @@ async def _run_stream(task: str) -> AsyncIterator[dict]:
                         yield ev
                     continue  # 修正後は再監査からやり直す
 
-            # --- F-04 サンドボックス検証 ---
-            yield _sse("verify_start", attempt=attempt)
-            result = await _verify(code, test_code, attempt)
+            # --- F-04 検証（api: サンドボックスでpytest / lp: ページ機械チェック）---
+            verify_mode = "page" if task_type == "lp" else "pytest"
+            yield _sse("verify_start", attempt=attempt, mode=verify_mode)
+            if task_type == "lp":
+                result = check_web(code)
+            else:
+                result = await _verify(code, test_code, attempt)
             yield _sse(
-                "verify_result", passed=result.passed, attempt=attempt, output=result.output[-1500:]
+                "verify_result",
+                passed=result.passed,
+                attempt=attempt,
+                mode=verify_mode,
+                output=result.output[-1500:],
             )
             if result.passed or attempt == MAX_ATTEMPTS:
                 break
+            failure_label = "ページ検証の指摘" if task_type == "lp" else "検証の失敗ログ(pytest)"
+            reason = _page_reason(result.output) if task_type == "lp" else result.headline()
             async for ev in _fix(
                 attempt + 1,
-                result.headline(),
-                f"[検証の失敗ログ(pytest)]\n{result.output[-1200:]}",
+                reason,
+                f"[{failure_label}]\n{result.output[-1200:]}",
             ):
                 yield ev
 
+        # --- app: 画面フェーズ（バックエンド検証の通過後・F-03 前段出力＝契約）---
+        fe_result: VerificationResult | None = None
+        if (
+            task_type == "app"
+            and result is not None
+            and result.passed
+            and (sec_report is None or sec_report.passed)
+        ):
+            endpoints = _list_field(outputs.get("designer"), "endpoints")
+            contract = (
+                "[APIけいやくしょ]\n" + "\n".join(endpoints)
+                + "\n\n[APIの動作確認方法]\n" + _field(outputs.get("implementer"), "how_to_verify")
+            )
+            yield _sse(
+                "handoff",
+                from_agent="implementer",
+                to_agent="frontend",
+                item="APIけいやくしょ",
+                detail="; ".join(endpoints)[:80],
+            )
+            fe_prompt = (
+                f"{base_prompt}\n\n[設計]\n{design}\n\n{contract}\n\n"
+                "この契約どおりにAPIを呼び出す画面（単一ファイルの index.html）を実装してください。"
+            )
+            frontend = frontend_agent
+            for fe_attempt in range(1, MAX_ATTEMPTS + 1):
+                fe_out: dict = {}
+                async for ev in _invoke(frontend, fe_prompt, fe_out):
+                    yield ev
+                if fe_out.get("text"):
+                    outputs["frontend"] = fe_out["text"]
+                html = _field(outputs.get("frontend"), "html")
+                if not html:
+                    break
+                yield _sse("verify_start", attempt=fe_attempt, mode="page")
+                fe_result = check_frontend(html, endpoints)
+                yield _sse(
+                    "verify_result",
+                    passed=fe_result.passed,
+                    attempt=fe_attempt,
+                    mode="page",
+                    output=fe_result.output[-1500:],
+                )
+                if fe_result.passed or fe_attempt == MAX_ATTEMPTS:
+                    break
+                # 差し戻し（修正責任は frontend 自身。F-13 交代も同様に適用）
+                yield _sse(
+                    "retry",
+                    attempt=fe_attempt + 1,
+                    max=MAX_ATTEMPTS,
+                    reason=f"画面: {_page_reason(fe_result.output)}",
+                )
+                if fe_attempt + 1 == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
+                    yield _sse("escalation", agent="frontend", to_model=PRO)
+                    frontend = make_frontend(PRO)
+                fe_prompt = (
+                    f"{base_prompt}\n\n[設計]\n{design}\n\n{contract}\n\n"
+                    f"[前回の画面実装]\n{html}\n\n"
+                    f"[画面検証の指摘]\n{fe_result.output[-1200:]}\n\n"
+                    "上記の問題を必ず修正した画面を作り直してください。"
+                )
+
         # 経験の蓄積（F-09）：最終結果から教訓を書き戻し、古い記憶を忘却する
+        final_result = fe_result if fe_result is not None else result
         if sec_report is not None and not sec_report.passed:
             yield _sse("memory_write", **_remember_security(task_type, sec_report))
-        elif result is not None:
-            yield _sse("memory_write", **_remember(task_type, outputs, result))
+        elif final_result is not None:
+            yield _sse("memory_write", **_remember(task_type, outputs, final_result))
         yield _sse("done")
     except Exception as exc:  # noqa: BLE001 - UIにエラーを流して終了
         yield _sse("error", message=str(exc))

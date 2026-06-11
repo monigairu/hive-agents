@@ -13,20 +13,25 @@ from agents.orchestrator.schemas import TestResult
 from shared.models import FLASH
 from shared.skills import skill_toolset
 
-tester_agent = Agent(
-    name="tester",
-    model=FLASH,
-    description="実装コードに対するpytestテストを生成するテスト担当",
-    output_schema=TestResult,
-    tools=[skill_toolset("pytest", "python-style")],
-    instruction=(
-        "あなたはテストエンジニアです。前段(implementer)が出力した実装結果のJSON"
-        "（code フィールドに FastAPI のコードが入っている）をテキストで受け取ります。"
-        "その code を読み、FastAPI の TestClient を使った pytest を生成してください。\n"
-        "- test_code: 主要なCRUD操作（作成→取得→更新→削除）を検証する pytest。"
-        "Markdownのコードフェンスで囲まず生のPythonだけを入れる。\n"
-        "- how_to_run: テストの実行コマンド（例: 'pytest test_main.py -q'）\n"
-        "- summary: 何を検証するテストかを1〜2文で\n"
-        "実装に存在しないエンドポイントはテストしないこと。"
-    ),
-)
+def make_tester() -> Agent:
+    """tester を生成する。グラフを組むたびに新インスタンスを作る（designer と同じ理由）。"""
+    return Agent(
+        name="tester",
+        model=FLASH,
+        description="実装コードに対するpytestテストを生成するテスト担当",
+        output_schema=TestResult,
+        tools=[skill_toolset("pytest", "python-style")],
+        instruction=(
+            "あなたはテストエンジニアです。前段(implementer)が出力した実装結果のJSON"
+            "（code フィールドに FastAPI のコードが入っている）をテキストで受け取ります。"
+            "その code を読み、FastAPI の TestClient を使った pytest を生成してください。\n"
+            "- test_code: 主要なCRUD操作（作成→取得→更新→削除）を検証する pytest。"
+            "Markdownのコードフェンスで囲まず生のPythonだけを入れる。\n"
+            "- how_to_run: テストの実行コマンド（例: 'pytest test_main.py -q'）\n"
+            "- summary: 何を検証するテストかを1〜2文で\n"
+            "実装に存在しないエンドポイントはテストしないこと。"
+        ),
+    )
+
+
+tester_agent = make_tester()
