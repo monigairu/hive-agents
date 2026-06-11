@@ -510,7 +510,7 @@ telemetry = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", extras = ["http-server"], specifier = ">=0.3.26" },
-    { name = "google-adk", extras = ["a2a"], specifier = ">=2.2,<3" },
+    { name = "google-adk", extras = ["a2a"], specifier = "==2.2.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'telemetry'", specifier = ">=1.27" },
     { name = "opentelemetry-sdk", marker = "extra == 'telemetry'", specifier = ">=1.27" },
 ]

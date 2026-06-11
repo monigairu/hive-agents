@@ -73,7 +73,7 @@ export function isRunning(): boolean {
   return current?.status === "running";
 }
 
-export function start(task: string, quality: string = "auto") {
+export function start(task: string, effort: string = "auto") {
   if (isRunning() || !task.trim()) return;
   es?.close();
   current = {
@@ -86,7 +86,7 @@ export function start(task: string, quality: string = "auto") {
   notify({ type: "__reset", data: {} });
 
   const src = new EventSource(
-    `${API}/stream?task=${encodeURIComponent(task)}&quality=${encodeURIComponent(quality)}`,
+    `${API}/stream?task=${encodeURIComponent(task)}&effort=${encodeURIComponent(effort)}`,
   );
   es = src;
   const push = (type: string, data: Record<string, unknown>) => {

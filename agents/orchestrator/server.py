@@ -31,7 +31,7 @@ from starlette.routing import Route
 
 from agents.app.agent import make_app_implementer, make_frontend
 from agents.implementer.agent import make_implementer
-from agents.orchestrator.router import classify
+from agents.orchestrator.router import classify, difficulty_rank
 from agents.orchestrator.workflow import build_workflow
 from agents.security_reviewer.agent import security_reviewer_agent
 from agents.tester.agent import tester_agent
@@ -222,39 +222,78 @@ def _parse_security(text: str | None) -> SecurityReport | None:
         return None
 
 
-def _quality_plan(quality: str, task_type: str, scale: str) -> dict:
-    """品質レベル（UI選択）を実行計画に解決する（F-02）。
+# 「さくせん」（F-02）：ユーザーが選ぶエフォート。タスク規模（討伐ランク）とは独立の軸。
+# ラベルはドラクエ「さくせん」のパロディだが商標回避のため一文字ひねったオリジナル表現。
+_SAKUSEN = {
+    "all_hands": "みんなでがんばれ",
+    "go_hard": "がんがんつくろうぜ",
+    "adaptive": "てきどにがんばれ",
+    "cost_saver": "コストだいじに",
+    "auto": "おまかせ",
+}
+# 旧quality値（v2.8初版）からの互換マッピング
+_LEGACY_EFFORT = {"fast": "cost_saver", "best": "go_hard", "balanced": "adaptive"}
 
-    "auto"（既定）は router の判定で自動決定：重い発注（scale=heavy）と
-    フルスタック（app）は最初から Pro で作る。Flashで2回失敗してから
+
+def _effort_plan(effort: str, task_type: str, scale: str) -> dict:
+    """「さくせん」（ユーザー選択のエフォート）を実行計画に解決する（F-02）。
+
+    "auto"（おまかせ・既定）は router の判定で自動決定：重い発注（scale=heavy）と
+    フルスタック（app）は go_hard 相当（最初からPro）。Flashで2回失敗してから
     Pro に交代するより、速く・安く・高品質に着地するため。
+
+    返り値（マッピング層のみ。モデル選択・パイプライン構成の既存ロジックは不変）:
+    - designer / implementer: 使用モデル
+    - escalate: F-13（Flash→Pro交代）を使うか
+    - force_security: F-15 監査を環境変数に関係なく強制ONにするか（all_hands）
+    - tree_search: F-12（Rewind木探索）予約フラグ。実装後に all_hands で自動ON
     """
-    if quality not in ("fast", "best"):
-        quality = "best" if (scale == "heavy" or task_type == "app") else "balanced"
-    if quality == "fast":
-        # はやさ優先：Flashのみ・交代なし（その分リトライは軽く回る）
-        return {"label": "はやさ優先", "designer": FLASH, "implementer": FLASH, "escalate": False}
-    if quality == "best":
-        # 品質優先：設計・実装とも最初から Pro（交代の余地なし＝最初から最強）
-        return {"label": "品質優先", "designer": PRO, "implementer": PRO, "escalate": False}
-    # バランス：Flashで始め、最終試行だけ Pro に交代（F-13）
-    return {"label": "バランス", "designer": FLASH, "implementer": FLASH, "escalate": True}
+    effort = _LEGACY_EFFORT.get(effort, effort)
+    if effort not in _SAKUSEN or effort == "auto":
+        effort = "go_hard" if (scale == "heavy" or task_type == "app") else "adaptive"
+    base = {
+        "effort": effort,
+        "label": _SAKUSEN[effort],
+        "force_security": False,
+        "tree_search": False,
+    }
+    if effort == "all_hands":
+        # いちばん丁寧：Pro＋セキュリティ監査強制（＋F-12は実装後にここでON）
+        return base | {
+            "designer": PRO, "implementer": PRO, "escalate": False,
+            "force_security": True, "tree_search": True,
+        }
+    if effort == "go_hard":
+        # 最初からPro（交代の余地なし＝最初から最強）
+        return base | {"designer": PRO, "implementer": PRO, "escalate": False}
+    if effort == "cost_saver":
+        # いちばん安い・速い：Flashのみ・交代なし
+        return base | {"designer": FLASH, "implementer": FLASH, "escalate": False}
+    # adaptive：Flashで始め、失敗が続いたら最終試行だけ Pro に交代（F-13の作戦化）
+    return base | {"designer": FLASH, "implementer": FLASH, "escalate": True}
 
 
-async def _run_stream(task: str, quality: str = "auto") -> AsyncIterator[dict]:
+async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
     """発注→（実装→検証→失敗なら修正）ループ→記録、を SSE で逐次配信する（F-04）。"""
     yield _sse("task_received", task=task)
     decision = classify(task)
     task_type = decision["task_type"]
-    plan = _quality_plan(quality, task_type, decision["scale"])
+    rank = difficulty_rank(task_type, decision["scale"])
+    plan = _effort_plan(effort, task_type, decision["scale"])
+    security_on = _SECURITY != "0" or plan["force_security"]
+    security_full = (_SECURITY not in ("0", "pattern")) or plan["force_security"]
     # 編成（F-02 動的エージェント組成）：このタスクで働くAgentをUIに知らせる
     party = list(_PARTY[task_type])
-    if _SECURITY != "0":
+    if security_on:
         party.append("security_reviewer")
     yield _sse(
         "router",
         task_type=task_type,
         scale=decision["scale"],
+        rank=rank,
+        effort=plan["effort"],
+        sakusen=plan["label"],
+        # 互換: v2.8初版のUI（quality表示）も壊さない
         quality=plan["label"],
         model=plan["implementer"],
         party=[{"agent": a, "role": AGENT_ROLE.get(a, "")} for a in party],
@@ -349,8 +388,9 @@ async def _run_stream(task: str, quality: str = "auto") -> AsyncIterator[dict]:
                 break
 
             # --- F-15 セキュリティ監査（implementer の出力直後・サンドボックスの前）---
+            # 「みんなでがんばれ」は環境変数に関係なく監査を強制ON（force_security）
             sec_report = None
-            if _SECURITY != "0":
+            if security_on:
                 yield _sse("security_start", attempt=attempt)
                 pattern_findings = scan_code(code)  # 第1層：決定論的パターン（$0）
                 if _DEMO_VULN and attempt <= _DEMO_VULN:
@@ -362,7 +402,7 @@ async def _run_stream(task: str, quality: str = "auto") -> AsyncIterator[dict]:
                         )
                     )
                 llm_review: SecurityReport | None = None
-                if _SECURITY != "pattern":
+                if security_full:
                     # 第2層：security-reviewer（Gemini Pro 固定・implementer とは別個体）
                     if task_type == "lp":
                         audit_prompt = (
@@ -519,8 +559,13 @@ def _remember(task_type: str, outputs: dict[str, str], result: VerificationResul
 
 async def stream(request: Request) -> EventSourceResponse:
     task = request.query_params.get("task") or DEFAULT_TASK
-    quality = request.query_params.get("quality") or "auto"
-    return EventSourceResponse(_run_stream(task, quality))
+    # effort（さくせん）が正。旧パラメータ quality も互換で受ける
+    effort = (
+        request.query_params.get("effort")
+        or request.query_params.get("quality")
+        or "auto"
+    )
+    return EventSourceResponse(_run_stream(task, effort))
 
 
 async def health(_: Request) -> JSONResponse:
