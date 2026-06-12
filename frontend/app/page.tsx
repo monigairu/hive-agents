@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { HistorySidebar } from "./components/HistorySidebar";
+import { SakusenSelect } from "./components/SakusenSelect";
 import * as quest from "./lib/quest";
 
 // Orchestrator(SSE) のエンドポイント。デプロイ時は NEXT_PUBLIC_HIVE_API で差し替え。
@@ -36,7 +37,9 @@ type TimelineItem =
       kind: "router";
       taskType: string;
       scale: string;
-      quality: string;
+      rank: string;
+      sakusen: string;
+      model: string;
       party: string[];
     }
   | { id: number; kind: "recall"; lessons: string[] }
@@ -77,7 +80,9 @@ function applyEvent(prev: TimelineItem[], type: string, d: any): TimelineItem[] 
           kind: "router",
           taskType: d.task_type,
           scale: d.scale,
-          quality: d.quality ?? "",
+          rank: d.rank ?? "",
+          sakusen: d.sakusen ?? d.quality ?? "",
+          model: String(d.model ?? "").includes("pro") ? "Pro" : "Flash",
           party: ((d.party as { agent: string }[]) ?? []).map((p) => labelOf(p.agent)),
         },
       ];
@@ -206,7 +211,7 @@ function summarize(agent: string, text: string) {
 
 export default function Home() {
   const [task, setTask] = useState("タスク管理のCRUD APIをFastAPIで作って");
-  const [quality, setQuality] = useState("auto");
+  const [effort, setEffort] = useState("auto");
   const [items, setItems] = useState<TimelineItem[]>([]);
   const [running, setRunning] = useState(false);
 
@@ -235,7 +240,7 @@ export default function Home() {
   }, []);
 
   function start() {
-    quest.start(task, quality); // __reset が飛び、subscribe 経由で一覧が切り替わる
+    quest.start(task, effort); // __reset が飛び、subscribe 経由で一覧が切り替わる
   }
 
   return (
@@ -266,17 +271,7 @@ export default function Home() {
           placeholder="例: 在庫管理のCRUD APIを作って／喫茶店のおしゃれなLPを作って"
           disabled={running}
         />
-        <select
-          value={quality}
-          onChange={(e) => setQuality(e.target.value)}
-          disabled={running}
-          title="品質レベル：使うモデルと作り込みを調整します"
-          className="rounded-lg border border-neutral-300 px-2 py-2 text-sm outline-none focus:border-amber-400 dark:border-neutral-700 dark:bg-neutral-900"
-        >
-          <option value="auto">おまかせ</option>
-          <option value="fast">はやさ優先</option>
-          <option value="best">品質優先</option>
-        </select>
+        <SakusenSelect value={effort} onChange={setEffort} disabled={running} />
         <button
           onClick={start}
           disabled={running}
@@ -331,11 +326,13 @@ function renderItem(it: TimelineItem) {
     case "router":
       return (
         <div className="text-center text-xs text-neutral-500">
-          ⚙️ ルーター判定：種別 <b>{it.taskType}</b> / 規模 <b>{it.scale}</b>
-          {it.quality && (
+          ⚙️ ルーター判定：討伐ランク{" "}
+          <b className="text-amber-600">{it.rank || "?"}</b>（種別 {it.taskType} / 規模{" "}
+          {it.scale}）
+          {it.sakusen && (
             <span>
               {" "}
-              / 品質 <b>{it.quality}</b>
+              ・さくせん <b>{it.sakusen}</b>（{it.model}）
             </span>
           )}{" "}
           → はたらきバチを編成

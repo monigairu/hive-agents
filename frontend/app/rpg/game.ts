@@ -486,7 +486,11 @@ class HiveRpgScene extends Phaser.Scene {
         const party = (d.party as { agent: string; role: string }[]) ?? [];
         if (party.length > 0) this.spawnParty(party);
         const names = party.map((p) => LABEL[p.agent] ?? p.agent).join("・");
-        if (names) this.addMessage(`なかま：${names}`);
+        const rank = String(d.rank ?? "?");
+        const sakusen = String(d.sakusen ?? d.quality ?? "");
+        this.addMessage(
+          `討伐ランク ${rank}${sakusen ? "／さくせん：" + sakusen : ""}${names ? "／なかま：" + names : ""}`,
+        );
         return;
       }
       case "memory_recall": {
@@ -578,12 +582,13 @@ class HiveRpgScene extends Phaser.Scene {
         const party = (d.party as { agent: string; role: string }[]) ?? [];
         if (party.length > 0) this.spawnParty(party);
         const names = party.map((p) => LABEL[p.agent] ?? p.agent).join("・");
-        const quality = String(d.quality ?? "");
-        this.addMessage(
-          `オーケストレーターが はたらきバチを へんせいした！（${String(d.task_type ?? "")}${quality ? "・" + quality : ""}）`,
-        );
+        const rank = String(d.rank ?? "?");
+        const sakusen = String(d.sakusen ?? d.quality ?? "");
+        const model = String(d.model ?? "").includes("pro") ? "Pro" : "Flash";
+        this.addMessage(`クエストなんいど：討伐ランク ${rank}（${String(d.task_type ?? "")}）`);
+        if (sakusen) this.addMessage(`さくせん：${sakusen}（モデル ${model}）`);
         if (names) this.addMessage(`なかま：${names}`);
-        return this.finish(1100);
+        return this.finish(1400);
       }
       case "memory_recall": {
         const lessons = (d.lessons as string[]) ?? [];

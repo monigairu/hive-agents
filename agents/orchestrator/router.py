@@ -32,6 +32,19 @@ def classify(text: str) -> dict[str, str]:
     return {"task_type": task_type, "scale": scale}
 
 
+def difficulty_rank(task_type: str, scale: str) -> str:
+    """クエスト難易度＝討伐ランク（E/C/S）を決定論で判定する（F-02）。
+
+    ユーザーが選ぶ「さくせん（エフォート）」とは独立した軸で、
+    発注内容そのものの重さを表す。加点式で透明性を保つ：
+    - フルスタック（app）＝API+画面の2成果物 → +1
+    - 大規模な発注（scale=heavy） → +1
+    0点=E（かんたん）/ 1点=C（ふつう）/ 2点=S（むずかしい）
+    """
+    points = (1 if task_type == "app" else 0) + (1 if scale == "heavy" else 0)
+    return {0: "E", 1: "C", 2: "S"}[points]
+
+
 def route_task(node_input: str) -> str:
     """ユーザーのタスク文を受け取り、種別・規模を判定して本文を後続へ渡す。
 
