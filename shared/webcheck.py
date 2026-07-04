@@ -17,6 +17,8 @@ from shared.sandbox import VerificationResult
 
 # 実コンテンツを書かずに残されがちなプレースホルダ
 _PLACEHOLDERS = ("lorem ipsum", "ここにテキスト", "サンプルテキスト", "placeholder")
+# アプリ用：入力欄の placeholder= はHTML属性として正当（良いUX）なので文言だけを見る
+_APP_PLACEHOLDERS = ("lorem ipsum", "ここにテキスト", "サンプルテキスト")
 # 外部画像・プレースホルダ画像サービス（単一ファイル原則違反＝表示崩れの元）
 _EXTERNAL_IMG = re.compile(r"<img[^>]+src=[\"']https?://", re.IGNORECASE)
 
@@ -105,6 +107,54 @@ def check_web(html: str) -> VerificationResult:
         return VerificationResult(passed=False, returncode=1, output=output)
     return VerificationResult(
         passed=True, returncode=0, output=f"ページ検証OK（本文{scan.text_len}文字・id {len(scan.ids)}個）"
+    )
+
+
+def check_app(html: str, persistence: str = "none") -> VerificationResult:
+    """単一HTMLアプリの構造チェック（appパイプライン・出荷基準①②③の機械判定・v2.9）。
+
+    LP向け check_web と違い、本文はJSが描画するため文字数・実コンテンツは要求しない。
+    代わりにアプリの成立条件（scriptがある・宣言どおりlocalStorage永続化がある）を見る。
+    JS実行時エラーの検出は runcheck.check_browser（出荷基準④）が担う。
+    """
+    problems: list[str] = []
+    stripped = (html or "").strip()
+    if not stripped:
+        return VerificationResult(passed=False, returncode=1, output="HTMLが空")
+
+    scan = _PageScan()
+    scan.feed(stripped)
+
+    if not stripped.lower().startswith("<!doctype html"):
+        problems.append("<!DOCTYPE html> で始まっていない")
+    for required in ("html", "head", "body"):
+        if required not in scan.tags:
+            problems.append(f"<{required}> タグがない")
+    if not scan.title:
+        problems.append("<title> が空または無い")
+    if not scan.has_viewport:
+        problems.append('<meta name="viewport"> が無い（スマホ対応＝出荷基準の必須要素）')
+    if "script" not in scan.tags:
+        problems.append("<script> が無い（アプリとして動作しない）")
+    if "style" not in scan.tags and "link" not in scan.tags:
+        problems.append("CSSが無い（<style> 内蔵が原則）")
+    lowered = stripped.lower()
+    for ph in _APP_PLACEHOLDERS:
+        if ph in lowered:
+            problems.append(f"プレースホルダ「{ph}」が残っている。実物の文言に置き換えること")
+    if _EXTERNAL_IMG.search(stripped):
+        problems.append("外部画像URLに依存している。CSS/インラインSVGで表現すること")
+    if persistence == "localstorage" and "localstorage" not in lowered:
+        problems.append(
+            "設計は localStorage 永続化を宣言しているのに実装に localStorage が無い"
+            "（リロードでデータが消える＝出荷基準違反）"
+        )
+
+    if problems:
+        output = "アプリ構造チェックで以下の問題を検出:\n" + "\n".join(f"- {p}" for p in problems)
+        return VerificationResult(passed=False, returncode=1, output=output)
+    return VerificationResult(
+        passed=True, returncode=0, output="アプリ構造チェックOK（構成・viewport・script・永続化）"
     )
 
 

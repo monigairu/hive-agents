@@ -58,9 +58,10 @@ def build_workflow(
 
     ルーティング判断は呼び出し側が router.classify で行い（コスト$0・決定論的）、
     モデルは品質レベル（F-02：ユーザー選択＋自動判定）に応じて差し替える。
+    - app: webapp designer → webapp implementer（既定・v2.9。ブラウザ完結の単一HTMLアプリ）
     - api: designer → implementer → tester（A2A切り替え対応）
     - lp : web designer → web implementer（M8。当面プロセス内実行のみ）
-    - app: app designer → app implementer → tester（frontend は後段で orchestrator が起動）
+    - fullstack: app designer → app implementer → tester（frontend は後段で orchestrator が起動）
     """
     from shared.models import FLASH
 
@@ -70,6 +71,21 @@ def build_workflow(
     # Workflow はAgentにモード等の状態を持たせるため、インスタンスを複数のグラフで
     # 使い回すと2つ目以降の構築が "mode='chat'" の検証エラーで落ちる。
     if task_type == "app":
+        from agents.webapp.agent import make_webapp_designer, make_webapp_implementer
+
+        return Workflow(
+            name="hive_orchestrator",
+            description="自然言語の発注を単一HTMLアプリパイプライン(designer→implementer)で処理する",
+            edges=[
+                (
+                    "START",
+                    route_task,
+                    make_webapp_designer(d_model),
+                    make_webapp_implementer(i_model),
+                ),
+            ],
+        )
+    if task_type == "fullstack":
         from agents.app.agent import make_app_designer, make_app_implementer
 
         return Workflow(

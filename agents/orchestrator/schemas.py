@@ -80,6 +80,28 @@ class WebImplementationResult(BaseModel):
     )
 
 
+class WebAppSpec(BaseModel):
+    """webapp designer の成果物：単一HTMLアプリの設計仕様（v2.9・appパイプライン）。"""
+
+    overview: str = Field(description="何のアプリか・誰がどう使うか")
+    features: list[str] = Field(
+        default_factory=list,
+        description="機能一覧。「ユーザーが〜できる」形式で過不足なく（例: '石を置くと相手の石が裏返る'）",
+    )
+    acceptance_criteria: list[str] = Field(
+        default_factory=list,
+        description="ブラウザ操作で確認できる受け入れ基準（例: 'リロードしても登録した収支が残っている'）",
+    )
+    persistence: str = Field(
+        default="none",
+        description='"localstorage"（ユーザーのデータを保存するアプリ）| "none"（ゲーム等・保存不要）',
+    )
+    style_direction: str = Field(
+        default="", description="画面の性格と配色3役・書体の方向性（web-designスキル）"
+    )
+    notes: str = Field(default="", description="設計上の補足（ゲームならルールの要点等）")
+
+
 class AppDesignSpec(BaseModel):
     """フルスタックdesigner の成果物：API＋画面の設計仕様（M8・appパイプライン）。"""
 
@@ -96,6 +118,22 @@ class AppDesignSpec(BaseModel):
         default="", description="画面の性格と配色・書体の方向性（web-designスキルの3役）"
     )
     notes: str = Field(default="", description="設計上の補足・前提")
+
+
+class LessonDraft(BaseModel):
+    """reflection の成果物：蒸留された教訓の下書き（F-08/F-09・v2.9.1）。
+
+    保存前に write-gate（shared.memory.acceptable_lesson の決定論チェック）を通す。
+    transferable=false の下書きは保存しない＝「無理に教訓を作らない」を構造で強制する。
+    """
+
+    transferable: bool = Field(
+        description="同種タスク全般に転用できる一般則が読み取れたら true。このタスク限りの事情しか無ければ false"
+    )
+    title: str = Field(description="どの状況の教訓かがわかる短い見出し（40字以内）")
+    lesson: str = Field(
+        description="次回に再利用できる教訓を1文で（200字以内・改行なし・アプリ名等の固有名詞なし）"
+    )
 
 
 class SecurityFindingItem(BaseModel):
