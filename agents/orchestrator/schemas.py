@@ -120,6 +120,22 @@ class AppDesignSpec(BaseModel):
     notes: str = Field(default="", description="設計上の補足・前提")
 
 
+class LessonDraft(BaseModel):
+    """reflection の成果物：蒸留された教訓の下書き（F-08/F-09・v2.9.1）。
+
+    保存前に write-gate（shared.memory.acceptable_lesson の決定論チェック）を通す。
+    transferable=false の下書きは保存しない＝「無理に教訓を作らない」を構造で強制する。
+    """
+
+    transferable: bool = Field(
+        description="同種タスク全般に転用できる一般則が読み取れたら true。このタスク限りの事情しか無ければ false"
+    )
+    title: str = Field(description="どの状況の教訓かがわかる短い見出し（40字以内）")
+    lesson: str = Field(
+        description="次回に再利用できる教訓を1文で（200字以内・改行なし・アプリ名等の固有名詞なし）"
+    )
+
+
 class SecurityFindingItem(BaseModel):
     """security-reviewer の指摘1件（要件 F-15）。ファイルパス・行番号は必須。"""
 

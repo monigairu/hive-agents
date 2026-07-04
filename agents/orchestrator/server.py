@@ -33,11 +33,12 @@ from agents.app.agent import make_app_implementer, make_frontend
 from agents.implementer.agent import make_implementer
 from agents.orchestrator.router import classify, difficulty_rank
 from agents.orchestrator.workflow import build_workflow
+from agents.reflection.agent import make_reflection
 from agents.security_reviewer.agent import security_reviewer_agent
 from agents.tester.agent import tester_agent
 from agents.web.agent import make_web_implementer
 from agents.webapp.agent import make_webapp_implementer
-from shared.memory import ReasoningBank, render_memories
+from shared.memory import ReasoningBank, acceptable_lesson, render_memories
 from shared.models import FLASH, PRO
 from shared.runcheck import check_browser
 from shared.sandbox import VerificationResult, verify_fastapi
@@ -149,8 +150,29 @@ MAX_ATTEMPTS = int(os.environ.get("HIVE_MAX_ATTEMPTS", "3"))
 _DEMO_FAIL = int(os.environ.get("HIVE_DEMO_FAIL_ATTEMPTS", "0"))
 # F-15 セキュリティ監査： "1"=両層（既定）/ "pattern"=第1層のみ（$0）/ "0"=無効
 _SECURITY = os.environ.get("HIVE_SECURITY", "1")
+# F-08 経験の学習（オフスイッチ）："0"で想起・記録を丸ごと止め、学習あり/なしをA/B比較できる
+_MEMORY_ON = os.environ.get("HIVE_MEMORY", "1") != "0"
 # デモ/テスト用：最初の N 回の監査に合成のcritical指摘を注入し、差し戻しを観察できる。
 _DEMO_VULN = int(os.environ.get("HIVE_DEMO_VULN_ATTEMPTS", "0"))
+
+
+async def _run_silent(agent, prompt: str) -> str | None:
+    """単一Agentを実行して最終テキストだけ返す（SSEイベントは流さない）。
+
+    reflection（教訓の蒸留）のような内部処理用。タイムライン/RPGの描画対象にしない。
+    """
+    runner = InMemoryRunner(agent=agent, app_name=APP_NAME)
+    session = await runner.session_service.create_session(app_name=APP_NAME, user_id="ui")
+    message = types.Content(role="user", parts=[types.Part(text=prompt)])
+    text: str | None = None
+    async for event in runner.run_async(
+        user_id="ui", session_id=session.id, new_message=message
+    ):
+        if event.content and event.content.parts:
+            t = "".join(p.text for p in event.content.parts if p.text)
+            if t:
+                text = t
+    return text
 
 
 async def _invoke(agent, prompt: str, out: dict) -> AsyncIterator[dict]:
@@ -233,6 +255,35 @@ def _parse_security(text: str | None) -> SecurityReport | None:
         )
     except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
         return None
+
+
+async def _distill(task_type: str, notes: list[str], result: VerificationResult) -> dict | None:
+    """検証記録から転用可能な教訓を蒸留する（F-08/F-09・v2.9.1）。
+
+    「いらない学習」を書かないための二重ゲート：
+    - reflection 自身が transferable=false と判断したら保存しない（無理に教訓を作らない）
+    - 出力が壊れている／acceptable_lesson（決定論チェック）を通らなければ保存しない
+    入力は機械が作った検証記録のみ（ユーザーの発注文を直接記憶させない＝注入対策）。
+    """
+    outcome = "最終的に検証に合格" if result.passed else "最大試行回数を使っても不合格"
+    listed = notes[-5:] or ["（差し戻しなし）"]
+    prompt = (
+        f"[タスク種別] {task_type}\n[検証記録（差し戻しの理由）]\n"
+        + "\n".join(f"- {n[:200]}" for n in listed)
+        + f"\n[結末] {outcome}（最終検証: {result.headline()[:200]}）"
+    )
+    try:
+        text = await _run_silent(make_reflection(), prompt)
+        data = json.loads(text or "")
+    except Exception:  # noqa: BLE001 - 蒸留の失敗は「記録しない」に倒す（本体を壊さない）
+        return None
+    if not isinstance(data, dict) or not data.get("transferable"):
+        return None
+    title = str(data.get("title") or "").strip()
+    lesson = str(data.get("lesson") or "").strip()
+    if not acceptable_lesson(title, lesson):
+        return None
+    return {"title": f"{task_type} {title}"[:80], "lesson": lesson}
 
 
 # 「さくせん」（F-02）：ユーザーが選ぶエフォート。タスク規模（討伐ランク）とは独立の軸。
@@ -318,12 +369,14 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
     )
 
     # 経験の想起（F-08）：同種タスクの教訓を検索し、タスク文の先頭に注入する
-    memories = _bank.retrieve(task, task_type)
+    # （HIVE_MEMORY=0 で丸ごと無効化＝学習あり/なしのA/B比較用オフスイッチ）
+    memories = _bank.retrieve(task, task_type) if _MEMORY_ON else []
     if memories:
         yield _sse("memory_recall", lessons=[m.title for m in memories])
     base_prompt = render_memories(memories) + task
 
     outputs: dict[str, str] = {}
+    failure_notes: list[str] = []  # 差し戻し理由の記録（F-08 蒸留の材料・機械産の情報のみ）
     result: VerificationResult | None = None
     try:
         # 試行1：WorkflowAgent グラフ（タスク種別＋品質レベルに応じたパイプライン・F-02）
@@ -446,6 +499,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                     findings=[f.model_dump() for f in sec_report.findings[:20]],
                 )
                 if not sec_report.passed:
+                    failure_notes.append(f"セキュリティ監査NG: {sec_report.headline()}")
                     if attempt == MAX_ATTEMPTS:
                         break
                     async for ev in _fix(
@@ -494,6 +548,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                 failure_label, reason = "アプリ検証の指摘", _page_reason(result.output)
             else:
                 failure_label, reason = "検証の失敗ログ(pytest)", result.headline()
+            failure_notes.append(f"検証NG({verify_mode}): {reason}")
             async for ev in _fix(
                 attempt + 1,
                 reason,
@@ -547,6 +602,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                 if fe_result.passed or fe_attempt == MAX_ATTEMPTS:
                     break
                 # 差し戻し（修正責任は frontend 自身。F-13 交代も同様に適用）
+                failure_notes.append(f"画面検証NG: {_page_reason(fe_result.output)}")
                 yield _sse(
                     "retry",
                     attempt=fe_attempt + 1,
@@ -563,12 +619,28 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                     "上記の問題を必ず修正した画面を作り直してください。"
                 )
 
-        # 経験の蓄積（F-09）：最終結果から教訓を書き戻し、古い記憶を忘却する
+        # 経験の蓄積（F-08/F-09・v2.9.1）：機械検証の結果だけを信号に学習する
         final_result = fe_result if fe_result is not None else result
-        if sec_report is not None and not sec_report.passed:
-            yield _sse("memory_write", **_remember_security(task_type, sec_report))
-        elif final_result is not None:
-            yield _sse("memory_write", **_remember(task_type, outputs, final_result))
+        if _MEMORY_ON:
+            if memories and final_result is not None:
+                # 有用性の実測：想起した教訓が成功に寄与したか（隔離・自浄の判断材料）
+                _bank.feedback([m.id for m in memories], final_result.passed)
+            if sec_report is not None and not sec_report.passed:
+                yield _sse("memory_write", **_remember_security(task_type, sec_report))
+            elif final_result is not None and (failure_notes or not final_result.passed):
+                # 差し戻しが起きたタスクだけ学習する。初回一発合格は新しい情報が無いので
+                # 記録しない（「成功しました」だけのゴミ教訓を作らない）
+                draft = await _distill(task_type, failure_notes, final_result)
+                if draft is not None:
+                    kind = "success" if final_result.passed else "failure"
+                    item = _bank.record(task_type, kind, draft["title"], draft["lesson"])
+                    yield _sse(
+                        "memory_write",
+                        kind=item.kind,
+                        title=item.title,
+                        distilled=True,
+                        forgotten=_bank.forget(),
+                    )
         yield _sse("done")
     except Exception as exc:  # noqa: BLE001 - UIにエラーを流して終了
         yield _sse("error", message=str(exc))
@@ -580,19 +652,6 @@ def _remember_security(task_type: str, report: SecurityReport) -> dict:
     item = _bank.record(
         task_type, "failure", f"{task_type} セキュリティ: {head[:50]}", f"次回の注意: {head}"
     )
-    return {"kind": item.kind, "title": item.title, "forgotten": _bank.forget()}
-
-
-def _remember(task_type: str, outputs: dict[str, str], result: VerificationResult) -> dict:
-    """検証結果を成功/失敗の教訓として記録し、忘却を実行して結果を返す。"""
-    overview = _field(outputs.get("designer"), "overview")
-    if result.passed:
-        item = _bank.record(
-            task_type, "success", f"{task_type} 成功: {overview[:50]}", overview or "実装・テストに成功"
-        )
-    else:
-        head = result.headline()
-        item = _bank.record(task_type, "failure", f"{task_type} 失敗: {head[:50]}", f"次回の注意: {head}")
     return {"kind": item.kind, "title": item.title, "forgotten": _bank.forget()}
 
 
