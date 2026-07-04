@@ -1,4 +1,7 @@
-"""フルスタック（API＋画面）パイプラインのAgent群（要件 F-02/F-03・M8）。
+"""fullstack（API＋画面）パイプラインのAgent群（要件 F-02/F-03・M8）。
+
+v2.9でタスク種別名を app → fullstack に改名（app はブラウザ完結の単一HTMLアプリ＝
+agents/webapp/ が担当）。ファイル・Agent実装は従来のまま。
 
 - app_designer_agent: APIと画面の両方を設計する（Agent名は "designer" で共通化）
 - make_frontend / frontend_agent: 画面担当。implementer の成果（APIの契約）に

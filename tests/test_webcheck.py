@@ -111,3 +111,84 @@ def test_frontend_path_param_prefix_matches():
 def test_frontend_no_endpoints_means_no_contract_check():
     result = check_frontend(GOOD_PAGE, [])
     assert result.passed
+
+
+# --- check_app（単一HTMLアプリの構造チェック・出荷基準・v2.9）---
+
+from shared.webcheck import check_app  # noqa: E402
+
+GOOD_APP = """<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>かけいぼ</title>
+<style>body { font-family: sans-serif; }</style>
+</head>
+<body>
+<h1>かけいぼ</h1>
+<main id="app"></main>
+<script>
+"use strict";
+const KEY = "kakeibo.v1";
+let state = [];
+try { state = JSON.parse(localStorage.getItem(KEY)) || []; } catch (e) { state = []; }
+document.getElementById("app").textContent = state.length + "件の記録";
+</script>
+</body>
+</html>"""
+
+
+def test_good_app_passes():
+    result = check_app(GOOD_APP, "localstorage")
+    assert result.passed, result.output
+
+
+def test_app_without_script_fails():
+    bad = GOOD_APP[: GOOD_APP.index("<script>")] + "</body></html>"
+    result = check_app(bad)
+    assert not result.passed
+    assert "script" in result.output
+
+
+def test_app_missing_declared_persistence_fails():
+    bad = GOOD_APP.replace("localStorage", "sessionStorage")
+    result = check_app(bad, "localstorage")
+    assert not result.passed
+    assert "localStorage" in result.output
+
+
+def test_app_persistence_none_does_not_require_localstorage():
+    game = GOOD_APP.replace("localStorage", "sessionStorage")
+    result = check_app(game, "none")
+    assert result.passed, result.output
+
+
+def test_app_does_not_require_long_text():
+    # ゲーム等は本文がJS描画のため、LPと違い静的な文字数を要求しない
+    result = check_app(GOOD_APP, "none")
+    assert result.passed, result.output
+
+
+def test_app_without_viewport_fails():
+    bad = GOOD_APP.replace('<meta name="viewport" content="width=device-width, initial-scale=1">', "")
+    result = check_app(bad)
+    assert not result.passed
+    assert "viewport" in result.output
+
+
+def test_app_input_placeholder_attribute_is_allowed():
+    # 入力欄の placeholder= はHTML属性として正当（LP向けの文言チェックと混同しない）
+    with_form = GOOD_APP.replace(
+        '<main id="app"></main>',
+        '<main id="app"><input type="text" placeholder="例: 食費 500円"></main>',
+    )
+    result = check_app(with_form, "localstorage")
+    assert result.passed, result.output
+
+
+def test_app_placeholder_text_still_fails():
+    bad = GOOD_APP.replace('<main id="app"></main>', "<main>ここにテキストが入ります</main>")
+    result = check_app(bad)
+    assert not result.passed
+    assert "プレースホルダ" in result.output

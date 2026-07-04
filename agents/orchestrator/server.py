@@ -36,10 +36,12 @@ from agents.orchestrator.workflow import build_workflow
 from agents.security_reviewer.agent import security_reviewer_agent
 from agents.tester.agent import tester_agent
 from agents.web.agent import make_web_implementer
+from agents.webapp.agent import make_webapp_implementer
 from shared.memory import ReasoningBank, render_memories
 from shared.models import FLASH, PRO
+from shared.runcheck import check_browser
 from shared.sandbox import VerificationResult, verify_fastapi
-from shared.webcheck import check_frontend, check_web
+from shared.webcheck import check_app, check_frontend, check_web
 from shared.security_patterns import (
     SecurityFinding,
     SecurityReport,
@@ -78,7 +80,7 @@ def _page_reason(output: str) -> str:
     return "ページ検証NG"
 
 APP_NAME = "hive-orchestrator"
-DEFAULT_TASK = "タスク管理のCRUD APIをFastAPIで作って"
+DEFAULT_TASK = "オセロを作って"
 
 # Agentの役割を可視化向けにラベル付け（F-14でキャラ職業に対応させる土台）
 AGENT_ROLE = {
@@ -100,20 +102,26 @@ def _sse(event_type: str, **payload) -> dict:
 
 
 # タスク種別ごとの実行順（F-02・差し込み式）。handoff の生成と修正ループの分岐に使う。
-# app のグラフ部分は api と同じ（frontend はバックエンド検証の通過後に別フェーズで起動）
+# app＝ブラウザ完結の単一HTMLアプリ（既定・v2.9）。fullstack（旧app）のグラフ部分は
+# api と同じ（frontend はバックエンド検証の通過後に別フェーズで起動）
 _PIPELINES = {
+    "app": ["designer", "implementer"],
     "api": ["designer", "implementer", "tester"],
     "lp": ["designer", "implementer"],
-    "app": ["designer", "implementer", "tester"],
+    "fullstack": ["designer", "implementer", "tester"],
 }
 # 編成（F-02 動的エージェント組成）。routerイベントに載せ、UIがパーティ表示に使う
 _PARTY = {
+    "app": ["designer", "implementer"],
     "api": ["designer", "implementer", "tester"],
     "lp": ["designer", "implementer"],
-    "app": ["designer", "implementer", "frontend", "tester"],
+    "fullstack": ["designer", "implementer", "frontend", "tester"],
 }
 # 受け渡すもの（item）と、受け手に伝える内容を抜き出すフィールド
 _HANDOFF_ITEMS = {
+    "app": {
+        "designer": ("せっけいしょ", "overview"),
+    },
     "api": {
         "designer": ("せっけいしょ", "overview"),
         "implementer": ("かんせいコード", "how_to_verify"),
@@ -121,15 +129,20 @@ _HANDOFF_ITEMS = {
     "lp": {
         "designer": ("デザインしようしょ", "style_direction"),
     },
-    "app": {
+    "fullstack": {
         "designer": ("せっけいしょ", "overview"),
         "implementer": ("かんせいコード", "how_to_verify"),
     },
 }
 # implementer の成果物が入るフィールド名
-_RESULT_KEY = {"api": "code", "lp": "html", "app": "code"}
+_RESULT_KEY = {"app": "html", "api": "code", "lp": "html", "fullstack": "code"}
 # F-13 交代時に使う implementer のファクトリ
-_IMPL_FACTORY = {"api": make_implementer, "lp": make_web_implementer, "app": make_app_implementer}
+_IMPL_FACTORY = {
+    "app": make_webapp_implementer,
+    "api": make_implementer,
+    "lp": make_web_implementer,
+    "fullstack": make_app_implementer,
+}
 
 MAX_ATTEMPTS = int(os.environ.get("HIVE_MAX_ATTEMPTS", "3"))
 # デモ/テスト用：最初の N 回の検証を強制的に失敗扱いにし、修正ループを観察できる。
@@ -238,9 +251,10 @@ _LEGACY_EFFORT = {"fast": "cost_saver", "best": "go_hard", "balanced": "adaptive
 def _effort_plan(effort: str, task_type: str, scale: str) -> dict:
     """「さくせん」（ユーザー選択のエフォート）を実行計画に解決する（F-02）。
 
-    "auto"（おまかせ・既定）は router の判定で自動決定：重い発注（scale=heavy）と
-    フルスタック（app）は go_hard 相当（最初からPro）。Flashで2回失敗してから
-    Pro に交代するより、速く・安く・高品質に着地するため。
+    "auto"（おまかせ・既定）は router の判定で自動決定：アプリ（app/fullstack）と
+    重い発注（scale=heavy）は go_hard 相当（最初からPro）。Flashで2回失敗してから
+    Pro に交代するより速く・安く・高品質に着地し、さらに app はゲームロジック等の
+    正しさを機械オラクルで完全判定できないため、モデル品質で先に担保する（v2.9）。
 
     返り値（マッピング層のみ。モデル選択・パイプライン構成の既存ロジックは不変）:
     - designer / implementer: 使用モデル
@@ -250,7 +264,11 @@ def _effort_plan(effort: str, task_type: str, scale: str) -> dict:
     """
     effort = _LEGACY_EFFORT.get(effort, effort)
     if effort not in _SAKUSEN or effort == "auto":
-        effort = "go_hard" if (scale == "heavy" or task_type == "app") else "adaptive"
+        effort = (
+            "go_hard"
+            if (scale == "heavy" or task_type in ("app", "fullstack"))
+            else "adaptive"
+        )
     base = {
         "effort": effort,
         "label": _SAKUSEN[effort],
@@ -404,9 +422,10 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                 llm_review: SecurityReport | None = None
                 if security_full:
                     # 第2層：security-reviewer（Gemini Pro 固定・implementer とは別個体）
-                    if task_type == "lp":
+                    if task_type in ("lp", "app"):
                         audit_prompt = (
-                            "以下のHTMLページを監査してください（行番号付き・file_pathは index.html）。"
+                            "以下のHTMLページ（アプリ）を監査してください"
+                            "（行番号付き・file_pathは index.html）。"
                             "観点：XSS・危険なインラインscript・外部リソースの読み込み・"
                             "秘密情報の混入・フォームの送信先。\n\n"
                         )
@@ -437,11 +456,27 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                         yield ev
                     continue  # 修正後は再監査からやり直す
 
-            # --- F-04 検証（api: サンドボックスでpytest / lp: ページ機械チェック）---
-            verify_mode = "page" if task_type == "lp" else "pytest"
+            # --- F-04 検証（app: 構造+ブラウザ実行 / lp: ページ機械チェック / api系: pytest）---
+            verify_mode = {"lp": "page", "app": "browser"}.get(task_type, "pytest")
             yield _sse("verify_start", attempt=attempt, mode=verify_mode)
             if task_type == "lp":
                 result = check_web(code)
+            elif task_type == "app":
+                # 出荷基準の2段オラクル（F-04・v2.9）：構造チェック→ブラウザ実行検証
+                persistence = _field(outputs.get("designer"), "persistence").lower()
+                result = check_app(code, persistence)
+                if result.passed:
+                    with agent_span(
+                        "hive.runcheck", operation="execute_tool", agent="browser"
+                    ) as span:
+                        browser_result = await asyncio.to_thread(check_browser, code)
+                        if span:
+                            span.set_attribute("verify.passed", browser_result.passed)
+                    result = VerificationResult(
+                        passed=browser_result.passed,
+                        returncode=browser_result.returncode,
+                        output=f"{result.output}\n{browser_result.output}",
+                    )
             else:
                 result = await _verify(code, test_code, attempt)
             yield _sse(
@@ -453,8 +488,12 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
             )
             if result.passed or attempt == MAX_ATTEMPTS:
                 break
-            failure_label = "ページ検証の指摘" if task_type == "lp" else "検証の失敗ログ(pytest)"
-            reason = _page_reason(result.output) if task_type == "lp" else result.headline()
+            if task_type == "lp":
+                failure_label, reason = "ページ検証の指摘", _page_reason(result.output)
+            elif task_type == "app":
+                failure_label, reason = "アプリ検証の指摘", _page_reason(result.output)
+            else:
+                failure_label, reason = "検証の失敗ログ(pytest)", result.headline()
             async for ev in _fix(
                 attempt + 1,
                 reason,
@@ -462,10 +501,10 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
             ):
                 yield ev
 
-        # --- app: 画面フェーズ（バックエンド検証の通過後・F-03 前段出力＝契約）---
+        # --- fullstack: 画面フェーズ（バックエンド検証の通過後・F-03 前段出力＝契約）---
         fe_result: VerificationResult | None = None
         if (
-            task_type == "app"
+            task_type == "fullstack"
             and result is not None
             and result.passed
             and (sec_report is None or sec_report.passed)

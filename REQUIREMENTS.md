@@ -1,9 +1,17 @@
-# Hive — 要件定義書 v2.8
+# Hive — 要件定義書 v2.9
 
 ## 0. このファイルについて
 
 Claude Codeが開発に入る前に読み込む要件定義書。
 実装の判断に迷ったときはここに立ち返ること。
+
+**v2.9の主な変更（ターゲット成果物の転換＝初心者が本当に発注するものを作る）**
+- **ゴールデンパスを「FastAPI CRUD API」から「ブラウザで開くだけで動く単一ファイルアプリ」に転換（F-02）**：ターゲット（§1.5 非エンジニア・一般ユーザー）が実際に発注するのは、オセロ・家計簿・クイズのような**身近なアプリ**であり、API単体ではない（APIはITを知らない人の語彙に存在しない）。routerの既定を app（クライアント完結アプリ）に変更する
+- **タスク種別を再定義（F-02）**：`app`＝クライアント完結の単一HTMLアプリ（**新・既定**）／`fullstack`＝API＋画面（旧app）／`api`・`lp`は維持。検証ループ・交代・可視化などの土台は全種別で共通（差し込み式の設計は不変）
+- **「出荷基準（Shipping Bar）」を品質の定義に追加（F-04）**：品質とは「テストが通る」ではなく「世に出せる」こと。①URLを開くだけで動く（単一ファイル・サーバー不要） ②リロードしてもデータが消えない（localStorage永続化） ③スマホで崩れない ④開いた瞬間にJSエラーがない、を機械検証する
+- **ブラウザ実行検証を追加（F-04）**：生成アプリを headless ブラウザ（chrome-headless-shell 直接起動・追加依存ゼロ）で実際に開き、JS実行エラー（Uncaught等）を機械検出する（`shared/runcheck.py`）。構造チェック（webcheck）だけでは「見た目は揃っているが動かないアプリ」が合格してしまう穴を塞ぐ
+- **おまかせ（auto）の自動判定を更新**：app／fullstack／heavy は最初からProで作る。ゲームロジック等の「正しさ」は機械オラクルで完全判定できないため、モデル品質で先に担保する（Flashの失敗を検証で拾えない領域では、最初からProが唯一の品質担保）
+- 受け入れ基準の上流定義（v2.5・P2）を app パイプラインで初めて実装：designerが「〜できる」形式の features / acceptance_criteria を書き、implementerの実装目標・ユーザーへの確認手順（how_to_verify）に接続する
 
 **v2.8の主な変更（実装監査を経て要件を実態に整合＋「さくせん」コマンド導入）**
 - **「さくせん」コマンドを導入（F-02）**：品質レベル選択をドラクエ風に再設計。ユーザーが選ぶ**エフォート5択**（みんなでがんばれ／がんがんつくろうぜ／てきどにがんばれ／コストだいじに／おまかせ）と、システムが自動判定する**討伐ランク（E/C/S）**の2軸に分離し、両方を画面表示して透明性を担保
@@ -170,9 +178,10 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
 - routerの判定結果（task_type / scale / 編成party / 品質プラン）はSSEのrouterイベントとして
   UIに流し、編成と判断根拠を可視化する（F-14）
 - 実装済みのパイプライン（差し込み式・タスク種で編成が変わる）：
-  - 「API作って」→ designer → implementer → tester
-  - 「LP作って」→ web designer → web implementer
-  - 「アプリ作って」→ app designer → implementer → tester → frontend（API契約に従って画面実装）
+  - 「オセロ作って」「家計簿アプリ作って」→ **app：webapp designer → webapp implementer（既定・v2.9）**。ブラウザだけで完結する単一 index.html（localStorage永続化）を生成し、構造チェック＋ブラウザ実行検証（F-04）で機械判定する
+  - 「API作って」→ api：designer → implementer → tester
+  - 「LP作って」→ lp：web designer → web implementer
+  - 「APIとそれを使う画面を作って」→ fullstack（旧app）：designer → implementer → tester → frontend（API契約に従って画面実装）
   - いずれも HIVE_SECURITY 有効時は security-reviewer が監査として参加
 
 - **Phase構造（Discover / Implement / Verify）**
@@ -195,11 +204,11 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
   | がんがんつくろうぜ | `go_hard` | 💰💰 設計・実装とも最初からPro（最初から最強） |
   | てきどにがんばれ | `adaptive` | 💰〜💰💰 Flashで始め、失敗したエージェントだけProに昇格＝**F-13エスカレーションの作戦化** |
   | コストだいじに | `cost_saver` | 💰 Flashのみ・交代なし。いちばん安い・速い。試し打ち向き |
-  | おまかせ（既定） | `auto` | routerが自動で見極める：heavy/app→がんがんつくろうぜ、それ以外→てきどにがんばれ |
+  | おまかせ（既定） | `auto` | routerが自動で見極める：app/fullstack/heavy→がんがんつくろうぜ、それ以外→てきどにがんばれ |
 
   **討伐ランク（クエスト難易度の自動判定・ギルド風表記）**
   - 発注文の機械判定（①発注文の長さ＝scale ②タスク種別）から決定論で算出し
-    「討伐ランク: E / C / S」と表記：app=+1点・heavy=+1点 → 0点=E／1点=C／2点=S
+    「討伐ランク: E / C / S」と表記：fullstack=+1点・heavy=+1点 → 0点=E／1点=C／2点=S
   - ランク・選択中のさくせん・使用モデル（Flash/Pro）をrouterイベントで
     タイムライン／RPG両方に表示＝判定の透明性を担保
   - ランク判定はゴールデンテスト（evals）でCI保証
@@ -208,17 +217,19 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
   - 「みんなでがんばれ」は **F-12（Rewind木探索）／F-15（セキュリティレビュー）への導線**
   - 「てきどにがんばれ」は **F-13（Flash→Proエスカレーション）の作戦化**
   - autoの根拠：Flashで2回失敗してからProに交代するより、最初からProの方が
-    速く・安く・高品質に着地する（E2E実測：app はFlashが2回失敗→Pro一発成功）
+    速く・安く・高品質に着地する（E2E実測：fullstack はFlashが2回失敗→Pro一発成功）。
+    さらに app（ゲーム・家計簿等）はロジックの正しさを機械オラクルで完全判定できない＝
+    Flashの失敗を検証で拾いきれないため、最初からProで品質を担保する（v2.9）
   - Claude CodeのDynamic Workflowsは1回938kトークン消費し「小タスクに使うとコスパが悪い」と公式に警告されている。Hiveは**難易度の自動判定＋さくせんによるユーザー上書き**で解決＝差別化ポイント
 
 > **参考：Claude Code「Dynamic Workflows」との関係**
 > 2026年、Claude CodeにDynamic Workflows（`workflow`入力で発動、Phase構造＋多数Agent並列＋収束）が追加され、HiveのF-02/F-03とほぼ同方向の実装が実在することが確認された。CyberAgentの実運用コメントでも「単発サブエージェントとフルチーム構築の間のギャップを埋め、visibilityを失わず長時間実行を信頼できる」と評価されている。HiveはこれをGCP（ADK）上で実現し、かつドラクエ風可視化（F-14）と規模自動調整で差別化する。
 
-> **タスク種の方針：設計は複数対応・実装はゴールデンパス1本から（重要）**
-> - 個人開発の工数制約下で「広く浅く」を避け、**1種類を完璧に・その過程が全部見える**を狙う。
-> - **深さの題材＝「FastAPI CRUD API」に確定**。理由：サンドボックスで起動して `curl` / `pytest` が機械的に白黒つく＝**検証オラクルが最もきれい**で、F-04の自己検証ループ・品質向上の仕組みが綺麗に回る。LP/フロントは「良し悪し」が主観的でオラクルを作りにくいため後回し。
-> - ただし **routerの分岐ルールとSkillToolsetは“差し込み式”に設計**し、2本目（LP等）の追加が「分岐1個＋skill1セット＋検証方法の定義」で済むようにしておく。WorkflowAgent・A2A・Memory・可視化などの土台（作業の約8割）は全タスク種で再利用できるため、最初から複数対応しても作業は減らず、リスクの高い初期にデバッグ対象が増えるだけ。
-> - **結論：枠は複数対応で開けておき、実装はAPI1本から。複数タスク対応はM8（ストレッチ）で拡張する。**
+> **タスク種の方針：深さの題材＝「ブラウザで開くだけで動く単一ファイルアプリ」（v2.9で転換）**
+> - 個人開発の工数制約下で「広く浅く」を避け、**1種類を完璧に・その過程が全部見える**を狙う方針は不変。
+> - **深さの題材を「FastAPI CRUD API」→「単一ファイルHTMLアプリ（オセロ・家計簿・クイズ等）」に転換**。理由：①ターゲット（非エンジニア）が実際に発注するのは身近なアプリであり、API単体は発注の語彙に存在しない ②成果物が「ブラウザで開くだけで動く」＝発注者本人がその場で確認でき、静的ホスティングだけで世に出せる（出荷基準・F-04）③検証オラクルも構造チェック＋ブラウザ実行検証（JSエラー機械検出）で白黒つけられる。
+> - API検証（サンドボックス＋pytest）の仕組みは api / fullstack パイプラインとして残す。**当初APIを深さの題材にした最大の理由（オラクルの綺麗さ）は、ブラウザ実行検証の実現（runcheck）で app でも成立するようになった**ため、題材をユーザー価値の高い方へ寄せる。
+> - routerの分岐ルールとSkillToolsetは“差し込み式”のまま：タスク種の追加は「分岐1個＋skill1セット＋検証方法の定義」で済む。
 
 ### F-03｜マルチエージェント実行（P0→直列はP0・並列はP1）
 - 各AgentはA2AプロトコルでCloud Runに独立デプロイされた独立サービス
@@ -252,6 +263,20 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
   - LLMが提案・サンドボックスが判定する決定論的なオラクル構造
   - LP/画面はpytestの代わりに決定論的ページ検証（webcheck：必須要素・実コンテンツ・
     リンク切れ・API契約参照を機械チェック）を同じループに接続する
+- **出荷基準（Shipping Bar・v2.9）＝ app パイプラインの合格基準**
+  - 品質の定義を「テストが通る」から「世に出せる」に引き上げる。appの成果物は以下を満たして合格：
+    1. **URLを開くだけで動く**：単一 index.html・サーバー不要・外部依存はGoogle Fontsのみ（＝静的ホスティングにそのまま置ける）
+    2. **リロードしてもデータが消えない**：データを扱うアプリ（家計簿等）はlocalStorage永続化必須（designerが `persistence` で宣言し、機械チェックする）
+    3. **スマホで崩れない**：viewport＋レスポンシブ（構造チェック）
+    4. **開いた瞬間にJSエラーがない**：ブラウザ実行検証（下記）
+- **ブラウザ実行検証（runcheck・v2.9）**
+  - 生成した index.html を headlessブラウザ（chrome-headless-shell を直接起動・
+    playwright等の追加依存ゼロ）で実際に開き、JSを実行して
+    Uncaught エラー等を stderr のコンソールログから機械検出する（決定論的・$0）
+  - 構造チェック（webcheck）→ ブラウザ実行検証（runcheck）の2段オラクル。
+    失敗ログはF-04ループでimplementerに差し戻す
+  - headless shell が環境に無い場合は実行検証をスキップし、構造チェックのみで判定
+    （検証の可用性より、環境が無いときに全タスクが失敗する方が害が大きい）
 - **検証役は修正しない原則（確定済み設計）**
   - tester・reviewer・security-reviewerはコードにパッチを当てず、「どの基準がなぜ落ちたか」の正確なレポートでimplementerに差し戻す
   - 修正責任をimplementer（およびF-13の交代先）に一元化することで、責任範囲が混ざらず、検証役のコンテキストも汚れない。現行実装はすでにこの方式＝変更不要
@@ -529,9 +554,9 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
 | Agent名 | 役割 | SkillToolset | 状態 |
 |---|---|---|---|
 | Orchestrator（女王蜂） | グラフワークフロー制御・router・品質プラン・Memory読み書き | - | 実装済み |
-| designer（api/lp/app各種） | 設計仕様の生成（タスク種で差し替え） | `api-design` / `web-design` | 実装済み |
-| implementer | コード生成（FastAPI / HTML） + how_to_verify | `python-style` `fastapi` / `web-design` | 実装済み |
-| frontend | API契約に従う画面実装（appのみ・F-03契約原則） | `web-design` | 実装済み |
+| designer（app/api/lp/fullstack各種） | 設計仕様の生成（タスク種で差し替え）。appでは features／acceptance_criteria／persistence を宣言 | `web-app` `web-design` / `api-design` | 実装済み |
+| implementer | コード生成（単一HTMLアプリ / FastAPI / LP） + how_to_verify | `web-app` `web-design` / `python-style` `fastapi` | 実装済み |
+| frontend | API契約に従う画面実装（fullstackのみ・F-03契約原則） | `web-design` | 実装済み |
 | tester | テストコード生成（実行はサンドボックスが担当） | `pytest` `python-style` | 実装済み |
 | security-reviewer | セキュリティ監査（Pro固定・パターンマッチ併用） | `security` | 実装済み |
 | reflection | Memory横断分析・整理（最小版の忘却はF-08内蔵） | - | P2・将来 |
@@ -548,23 +573,23 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
 
 ```
 Step 1: ユーザーがチャットで入力
-        「タスク管理APIを作って。PythonのFastAPIで、
-          タスクのCRUDができるもの」
+        「オセロを作って」「家計簿アプリを作って。
+          収支を登録して一覧で見られるもの」
 
 Step 2: WorkflowAgentが起動
         → router（Function Node）がタスクを解析
-        → 「API系パイプライン」に分岐
+        → 「appパイプライン（クライアント完結アプリ）」に分岐（既定）
         → UIに「働き蜂を編成しました」と表示
 
 Step 3: SequentialAgentが各Agentを順次呼び出し（Phase 1）
-        designer    → 仕様書・ディレクトリ構成を生成
-        implementer → FastAPIコード + how_to_verify を生成
-        tester      → pytestコードを生成
+        designer    → 機能一覧(features)・受け入れ基準・永続化方針・デザイン方針を設計
+        implementer → 単一 index.html（CSS/JS内蔵・localStorage永続化）+ how_to_verify
 
 Step 4: 監査と検証の自走ループ（実装済み）
         → security-reviewer が監査（Critical検出で差し戻し）
-        → サンドボックスで実際にpytest実行（失敗ログを添えて差し戻し）
-        → 最大3回。バランスプランは最終試行でPro交代（F-13）
+        → 構造チェック(webcheck) + ブラウザ実行検証(runcheck)＝出荷基準の機械判定
+          （api/fullstack はサンドボックスで実際に pytest 実行）
+        → 失敗ログを添えて差し戻し・最大3回。てきどにがんばれは最終試行でPro交代（F-13）
 
 Step 5: OrchestratorがプレビューデプロイしてURL返却（F-06・M8）
         → 生成物を Cloud Run にデプロイ（決定論的処理・devops Agentは使わない）
@@ -641,22 +666,24 @@ hive-agents/
 │   │   ├── router.py         # Function Node（種別・規模判定。コスト$0）
 │   │   ├── schemas.py        # 各Agentの出力スキーマ（Pydantic）
 │   │   └── server.py         # SSE配信・監査/検証ループ・品質プラン（uvicorn起動）
+│   ├── webapp/               # appパイプライン（既定・v2.9）：単一HTMLアプリのdesigner/implementer
 │   ├── designer/  implementer/  tester/   # APIパイプライン（各 agent.py + A2A用 main.py）
 │   ├── web/                  # LPパイプライン（web designer / web implementer）
-│   ├── app/                  # フルスタック（app designer / frontend / 責任範囲note）
+│   ├── app/                  # fullstack（旧app）：API+画面（app designer / frontend / 責任範囲note）
 │   └── security_reviewer/    # F-15 監査（Pro固定）
 │
 ├── shared/                   # 共通モジュール（ここが品質装置の本体）
 │   ├── memory.py             # F-08 ReasoningBank（教訓の蒸留・想起・忘却）
 │   ├── sandbox.py            # F-04 uv隔離サンドボックス（環境変数遮断つき）
-│   ├── webcheck.py           # LP/画面の決定論的検証＋API契約チェック
+│   ├── webcheck.py           # LP/画面/アプリの決定論的構造検証＋API契約チェック
+│   ├── runcheck.py           # F-04 ブラウザ実行検証（headless shellでJSエラー機械検出・v2.9）
 │   ├── security_patterns.py  # F-15 第1層・決定論的パターンマッチ
 │   ├── skills.py             # F-07 SkillToolset共有カタログのローダー
 │   ├── models.py             # FLASH/PRO のモデルID集約
 │   └── telemetry.py          # OTel GenAIトレース（F-14）
 │
 ├── skills/                   # スキル共有カタログ（全Agentが名前で装着＝知識の一貫性）
-│   ├── api-design/ fastapi/ pytest/ python-style/ security/ web-design/
+│   ├── api-design/ fastapi/ pytest/ python-style/ security/ web-design/ web-app/
 │
 ├── frontend/                 # Next.js + Tailwind CSS
 │   └── app/
@@ -772,14 +799,16 @@ iam.googleapis.com
 | プロダクト名 | Hive | Orchestrator＝女王蜂・Agent＝働き蜂の比喩が構造と一致 |
 | ADKバージョン | **ADK 2.x 最新安定版に追随（現在 2.2.0）** | 2026/5/19にGA化。セキュリティ修正を取り込みつつ最新グラフ機能をフル活用できる |
 | Agent組成ロジック | ADK 2.x WorkflowAgent + router（Function Node） | プロンプト任せより決定論的・ハルシネーション防止・コスト$0 |
-| さくせん／討伐ランク | エフォート5択（all_hands/go_hard/adaptive/cost_saver/auto）×難易度自動判定（E/C/S）の2軸。おまかせ時はheavy/appを最初からPro | ユーザーの意思とタスク規模を分離して両方可視化。Flashで失敗を消費するより最初からProが速く・安く・高品質（E2E実測） |
+| さくせん／討伐ランク | エフォート5択（all_hands/go_hard/adaptive/cost_saver/auto）×難易度自動判定（E/C/S）の2軸。おまかせ時はapp/fullstack/heavyを最初からPro | ユーザーの意思とタスク規模を分離して両方可視化。Flashで失敗を消費するより最初からProが速く・安く・高品質（E2E実測）。appはロジックの正しさを機械判定しきれないためモデル品質で担保（v2.9） |
 | ワークフロー構造 | Phase（Discover/Implement/Verify）単位で構成 | 可視性が高まり、各フェーズ末で検証してから次へ進める。Dynamic Workflowsと同方向 |
 | チャレンジ枠 | Rewindを使った行動の木探索（F-12） | 審査の「意外性」に直接訴求。ADK 2.xのRewind primitiveを応用 |
 | A2A実装方式 | ADKネイティブ（`to_a2a()` / `RemoteA2aAgent`） | 手動HTTP比でIAM統合・プロトコル管理が自動化される |
 | MVP実行方式 | SequentialAgent（並列化はPhase 2） | A2A＋並列のデバッグ複雑度を避け、E2E通過を最優先 |
 | 開発の進め方 | マイルストーンM0〜M8の垂直スライス（各M末で常にデモ可能） | 個人開発6週間で途中時間切れでも提出物が成立する構造にする |
 | A2Aの実装順序 | 最初ではなくM2（まず1プロセス内E2E→外出し） | 頭脳のバグとA2A/ネットワークのバグを分離。A2A独立デプロイ自体は差別化核①として必ず実装 |
-| 対象タスク種 | 実装はFastAPI CRUD 1本から（router/skillは差し込み式・複数対応はM8拡張） | APIは検証オラクルが最もきれいで品質ループが回る。土台は全タスク種で再利用でき、初期の複数対応はリスクのみ増える |
+| 対象タスク種 | ゴールデンパス＝app（単一HTMLアプリ・既定）。api/lp/fullstackも差し込み式で維持（v2.9で転換） | ターゲットの非エンジニアが発注するのは身近なアプリでありAPI単体ではない。ブラウザ実行検証（runcheck）の実現でappにも機械オラクルが成立した |
+| 出荷基準（Shipping Bar） | appの合格基準＝①URLを開くだけで動く ②リロードでデータが消えない（localStorage） ③スマホで崩れない ④JSエラーなし（v2.9） | 品質の定義を「テストが通る」から「世に出せる」へ引き上げる。全項目が決定論的に機械検証できる |
+| ブラウザ実行検証の方式 | chrome-headless-shell を subprocess で直接起動し、コンソールログからJSエラーを検出（playwright等の依存追加なし・v2.9） | 依存ゼロ・決定論的・$0。サンドボックス（LLM提案・機械判定）と同じオラクル思想をブラウザに拡張 |
 | 品質の核の優先度 | サンドボックス検証/交代/セキュリティをMUSTに格上げ | 成果物の品質にこだわるため。品質の劇的な瞬間が可視化の見せ場にもなり一石二鳥 |
 | 可視化の実装方式 | データ(SSEイベント)と描画(Phaser)を分離。最小可視化をM3、RPGをM7 | やり取りの可視化を目玉にしつつ、RPG描画が間に合わなくても機能が残る |
 | F-14のサウンド | 実装しない（Tone.js対象外） | 工数を可視化の本体＝エージェント間のやり取りの表現に集中させる |
@@ -801,6 +830,7 @@ iam.googleapis.com
 ---
 
 *作成日：2026年5月*
+*更新日：2026年7月4日（v2.9・§0参照）：ターゲット成果物を転換。ゴールデンパスをFastAPI CRUD→単一ファイルHTMLアプリ（オセロ・家計簿等）へ（routerの既定＝app）。出荷基準（Shipping Bar）とブラウザ実行検証（runcheck）をF-04に追加。旧appパイプラインはfullstackに改名*
 *更新日：2026年6月12日（v2.8・§0参照）：実装監査を経て要件を実態に整合（ReasoningBank・uvサンドボックス＋環境変数遮断・リポジトリ構成・reviewer/devops非採用）＋「さくせん」コマンド（エフォート5択×討伐ランクE/C/Sの2軸）導入*
 *更新日：2026年6月10日（v2.4〜v2.7・§0参照）：ADK 2.2.0対応（v2.4）＋品質要件の強化（受け入れ基準の上流定義・検証役の責任分離・レビュー出力フォーマット）（v2.5）＋自動化・無人実行の要件追加（git安全装置・トリガー発注・コスト暴走対策）（v2.6）＋実行モードとプレビューデプロイの確定（v2.7）。※冒頭のvX.X（要件改訂）と以下の更新履歴のvX.X（旧採番）は系列が異なる点に注意*
 *更新日：2026年5月30日（v2.7）*

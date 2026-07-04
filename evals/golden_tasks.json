@@ -2,6 +2,30 @@
   "threshold": 0.5,
   "tasks": [
     {
+      "id": "othello",
+      "task": "オセロを作って",
+      "task_type": "app",
+      "scale": "light",
+      "must_pass_app": true,
+      "rank": "E"
+    },
+    {
+      "id": "household-app",
+      "task": "家計簿アプリを作って。収支を登録して一覧で見られる画面がほしい",
+      "task_type": "app",
+      "scale": "light",
+      "must_pass_app": true,
+      "rank": "E"
+    },
+    {
+      "id": "quiz-app",
+      "task": "4択クイズゲームを作って。正解数がスコアとして表示されるもの",
+      "task_type": "app",
+      "scale": "light",
+      "must_pass_app": true,
+      "rank": "E"
+    },
+    {
       "id": "todo-crud",
       "task": "タスク管理のCRUD APIをFastAPIで作って",
       "task_type": "api",
@@ -26,20 +50,20 @@
       "rank": "E"
     },
     {
-      "id": "household-app",
-      "task": "家計簿アプリを作って。収支を登録して一覧で見られる画面がほしい",
-      "task_type": "app",
-      "scale": "light",
-      "must_pass_tests": false,
-      "rank": "C"
-    },
-    {
       "id": "cafe-lp",
       "task": "喫茶店のおしゃれなホームページを作って",
       "task_type": "lp",
       "scale": "light",
       "must_pass_tests": false,
       "rank": "E"
+    },
+    {
+      "id": "reservation-fullstack",
+      "task": "予約管理のAPIと、それを操作できる管理画面を作って",
+      "task_type": "fullstack",
+      "scale": "light",
+      "must_pass_tests": false,
+      "rank": "C"
     },
     {
       "id": "inventory-system",
