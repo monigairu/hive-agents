@@ -166,6 +166,38 @@ def check_browser(html: str, timeout: int = 30) -> VerificationResult:
     )
 
 
+def screenshot_mobile(html: str, timeout: int = 30) -> bytes | None:
+    """スマホ幅（390x844）でページを実描画したスクリーンショットPNGを返す。
+
+    出荷基準③「スマホで崩れない」の実画面判定（shared/layoutcheck.py）に使う。
+    ブラウザが無い・失敗した場合は None（呼び出し側はスキップする）。
+    """
+    browser = find_browser()
+    if browser is None:
+        return None
+    with tempfile.TemporaryDirectory(prefix="hive-shot-") as d:
+        page = Path(d) / "index.html"
+        shot = Path(d) / "shot.png"
+        page.write_text(html, encoding="utf-8")
+        cmd = [
+            str(browser),
+            "--headless",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--window-size=390,844",
+            "--virtual-time-budget=5000",
+            f"--screenshot={shot}",
+            f"file://{page}",
+        ]
+        try:
+            subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, env=_browser_env()
+            )
+        except subprocess.TimeoutExpired:
+            return None
+        return shot.read_bytes() if shot.is_file() else None
+
+
 # --- 受け入れ基準のブラウザ実行テスト（F-04・v2.10） --------------------------
 # designer が書いた検証スクリプト（hiveAssert の列）をページに注入して実行し、
 # 「要求どおり操作できるか」を機械判定する。書くのは設計担当・通すのは実装担当

@@ -41,6 +41,7 @@ from agents.web.agent import make_web_implementer
 from agents.webapp.agent import make_webapp_implementer
 from shared.memory import ReasoningBank, acceptable_lesson, render_memories
 from shared.models import FLASH, PRO, with_thinking
+from shared.layoutcheck import check_layout
 from shared.runcheck import check_acceptance, check_browser
 from shared.sandbox import VerificationResult, verify_fastapi
 from shared.webcheck import check_app, check_frontend, check_web
@@ -155,6 +156,8 @@ _SECURITY = os.environ.get("HIVE_SECURITY", "1")
 _MEMORY_ON = os.environ.get("HIVE_MEMORY", "1") != "0"
 # F-01 発注ゲート（オフスイッチ）："0"で正規化を止め、発注の原文だけで実行する
 _INTAKE_ON = os.environ.get("HIVE_INTAKE", "1") != "0"
+# F-04 スマホ表示のvision判定（v2.10・レポートのみ）："0"でスクショ判定を止める
+_LAYOUT_ON = os.environ.get("HIVE_LAYOUT", "1") != "0"
 # F-02 おまかせの節約モード（v2.10・実験スイッチ）："1"でE級appをFlash＋思考HIGHで作る。
 # 出荷基準evalの実測が 1/3（2026-07-09・単発実行）だったため既定はOFF＝最初からPro。
 # モデルが世代交代したら `HIVE_AUTO_ECON=1 make eval-full` で再実測して判断する
@@ -583,6 +586,15 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                         returncode=acc.returncode,
                         output=f"{result.output}\n{acc.output}",
                     )
+                # スマホ表示のvision判定（F-04・v2.10）：レポートのみ＝合否は変えない
+                if result.passed and _LAYOUT_ON:
+                    layout_note = await asyncio.to_thread(check_layout, code)
+                    if layout_note:
+                        result = VerificationResult(
+                            passed=True,
+                            returncode=0,
+                            output=f"{result.output}\n{layout_note}",
+                        )
             else:
                 result = await _verify(code, test_code, attempt)
             yield _sse(

@@ -140,3 +140,14 @@ def test_check_acceptance_broken_script_fails():
     result = check_acceptance(_COUNTER_HTML, "document.getElementById('存在しないid').click();")
     assert not result.passed
     assert "中断" in result.output
+
+
+# --- スマホ幅スクリーンショット（F-04・v2.10） --------------------------------
+
+from shared.runcheck import screenshot_mobile  # noqa: E402
+
+
+@_needs_browser
+def test_screenshot_mobile_returns_png():
+    png = screenshot_mobile(_OK_HTML)
+    assert png is not None and png[:8] == b"\x89PNG\r\n\x1a\n"
