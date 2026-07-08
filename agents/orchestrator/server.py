@@ -41,7 +41,7 @@ from agents.web.agent import make_web_implementer
 from agents.webapp.agent import make_webapp_implementer
 from shared.memory import ReasoningBank, acceptable_lesson, render_memories
 from shared.models import FLASH, PRO, with_thinking
-from shared.runcheck import check_browser
+from shared.runcheck import check_acceptance, check_browser
 from shared.sandbox import VerificationResult, verify_fastapi
 from shared.webcheck import check_app, check_frontend, check_web
 from shared.security_patterns import (
@@ -572,6 +572,16 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                         passed=browser_result.passed,
                         returncode=browser_result.returncode,
                         output=f"{result.output}\n{browser_result.output}",
+                    )
+                # 第3段オラクル（F-04・v2.10）：designerが書いた受け入れ検証スクリプトを
+                # ブラウザで実行し「要求どおり操作できるか」を機械採点する
+                check_script = _field(outputs.get("designer"), "check_script")
+                if result.passed and check_script:
+                    acc = await asyncio.to_thread(check_acceptance, code, check_script)
+                    result = VerificationResult(
+                        passed=acc.passed,
+                        returncode=acc.returncode,
+                        output=f"{result.output}\n{acc.output}",
                     )
             else:
                 result = await _verify(code, test_code, attempt)

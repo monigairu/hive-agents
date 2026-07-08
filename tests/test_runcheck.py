@@ -95,3 +95,48 @@ def test_check_browser_detects_blank_screen():
     result = check_browser(_BLANK_HTML)
     assert not result.passed
     assert "白画面" in result.output
+
+
+# --- 受け入れ基準のブラウザ実行テスト（F-04・v2.10） --------------------------
+
+from shared.runcheck import _with_harness, check_acceptance  # noqa: E402
+
+_COUNTER_HTML = (
+    '<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8"><title>counter</title></head>'
+    '<body><p id="count">0</p><button id="inc">たす</button>'
+    "<script>document.getElementById('inc').addEventListener('click',()=>{"
+    "const c=document.getElementById('count');c.textContent=String(Number(c.textContent)+1);});"
+    "</script></body></html>"
+)
+
+
+def test_with_harness_injects_before_body_close():
+    injected = _with_harness(_COUNTER_HTML, "hiveAssert('x', true);")
+    assert "hiveAssert('x', true);" in injected
+    assert injected.index("hiveAssert('x'") < injected.index("</body>")
+    # </body> が無いHTMLでも末尾に足される
+    assert "hiveAssert" in _with_harness("<p>a</p>", "hiveAssert('y', true);")
+
+
+@_needs_browser
+def test_check_acceptance_pass_and_fail():
+    ok = check_acceptance(
+        _COUNTER_HTML,
+        "document.getElementById('inc').click();"
+        "hiveAssert('ボタンでカウントが増える', document.getElementById('count').textContent === '1');",
+    )
+    assert ok.passed and "1件合格" in ok.output
+
+    ng = check_acceptance(
+        _COUNTER_HTML,
+        "hiveAssert('最初から100になっている', document.getElementById('count').textContent === '100');",
+    )
+    assert not ng.passed
+    assert "最初から100になっている" in ng.output
+
+
+@_needs_browser
+def test_check_acceptance_broken_script_fails():
+    result = check_acceptance(_COUNTER_HTML, "document.getElementById('存在しないid').click();")
+    assert not result.passed
+    assert "中断" in result.output

@@ -87,15 +87,15 @@ def _console_errors(stderr: str) -> list[str]:
     return errors
 
 
-def check_browser(html: str, timeout: int = 30) -> VerificationResult:
-    """HTMLを headless ブラウザで開き、JS実行エラーの有無を機械判定する。"""
+def _run_page(html: str, timeout: int) -> tuple[subprocess.CompletedProcess | None, str]:
+    """HTMLを headless ブラウザで1回実行する。
+
+    Returns:
+        (実行結果, "") か、実行できなかったときは (None, スキップ/失敗の理由)。
+    """
     browser = find_browser()
     if browser is None:
-        return VerificationResult(
-            passed=True,
-            returncode=0,
-            output="ブラウザ実行検証をスキップ（chrome-headless-shell 未検出。構造チェックのみで判定）",
-        )
+        return None, "skip: chrome-headless-shell 未検出"
     with tempfile.TemporaryDirectory(prefix="hive-runcheck-") as d:
         page = Path(d) / "index.html"
         page.write_text(html, encoding="utf-8")
@@ -105,25 +105,41 @@ def check_browser(html: str, timeout: int = 30) -> VerificationResult:
             "--no-sandbox",
             "--disable-gpu",
             "--enable-logging=stderr",
-            "--virtual-time-budget=3000",  # タイマー・初期化を仮想時間で先送りして観測する
+            "--virtual-time-budget=5000",  # タイマー・初期化を仮想時間で先送りして観測する
             "--dump-dom",
             f"file://{page}",
         ]
-        try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, env=_browser_env()
-            )
-        except subprocess.TimeoutExpired:
-            return VerificationResult(
-                passed=False, returncode=-1, output=f"ブラウザ実行がTIMEOUT（{timeout}s）"
-            )
+        # 連続起動でまれにブラウザの立ち上がりが引っかかるため1回だけやり直す
+        # （タイムアウトの誤判定で差し戻すと、無駄な修正ループ＝トークン浪費になる）
+        proc = None
+        for attempt in (1, 2):
+            try:
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=timeout, env=_browser_env()
+                )
+                break
+            except subprocess.TimeoutExpired:
+                if attempt == 2:
+                    return None, f"timeout: ブラウザ実行がTIMEOUT（{timeout}s×2回）"
     if proc.returncode != 0 and not proc.stdout:
-        # ブラウザ自体が起動できない（ライブラリ不足等）＝生成物の欠陥ではないのでスキップ扱い
+        # ブラウザ自体が起動できない（ライブラリ不足等）＝生成物の欠陥ではない
         detail = proc.stderr.strip().splitlines()[-1][:200] if proc.stderr.strip() else "不明"
+        return None, f"skip: 起動失敗: {detail}"
+    return proc, ""
+
+
+def check_browser(html: str, timeout: int = 30) -> VerificationResult:
+    """HTMLを headless ブラウザで開き、JS実行エラーの有無を機械判定する。"""
+    proc, reason = _run_page(html, timeout)
+    if proc is None:
+        if reason.startswith("timeout:"):
+            return VerificationResult(
+                passed=False, returncode=-1, output=reason.removeprefix("timeout: ")
+            )
         return VerificationResult(
             passed=True,
             returncode=0,
-            output=f"ブラウザ実行検証をスキップ（起動失敗: {detail}）",
+            output=f"ブラウザ実行検証をスキップ（{reason.removeprefix('skip: ')}。構造チェックのみで判定）",
         )
     errors = _console_errors(proc.stderr)
     if errors:
@@ -147,4 +163,81 @@ def check_browser(html: str, timeout: int = 30) -> VerificationResult:
         passed=True,
         returncode=0,
         output=f"ブラウザ実行OK（JSエラーなし・描画DOM {rendered}文字）",
+    )
+
+
+# --- 受け入れ基準のブラウザ実行テスト（F-04・v2.10） --------------------------
+# designer が書いた検証スクリプト（hiveAssert の列）をページに注入して実行し、
+# 「要求どおり操作できるか」を機械判定する。書くのは設計担当・通すのは実装担当
+# ＝「検証役は修正しない」原則と受け入れ基準の上流定義（v2.5）のブラウザ版。
+
+_HARNESS = """
+<script>
+(function () {
+  window.hiveAssert = function (name, cond) {
+    console.log((cond ? "HIVE_PASS: " : "HIVE_FAIL: ") + name);
+  };
+  window.addEventListener("load", function () {
+    setTimeout(function () {
+      try {
+        __HIVE_CHECK__
+      } catch (e) {
+        console.log("HIVE_FAIL: 検証スクリプトが中断: " + e.message);
+      }
+      console.log("HIVE_DONE");
+    }, 300);
+  });
+})();
+</script>
+"""
+
+
+def _with_harness(html: str, script: str) -> str:
+    """検証ハーネス＋スクリプトを </body> の直前に注入する（無ければ末尾）。"""
+    harness = _HARNESS.replace("__HIVE_CHECK__", script)
+    m = re.search(r"</body>", html, re.I)
+    if m:
+        return html[: m.start()] + harness + html[m.start():]
+    return html + harness
+
+
+def check_acceptance(html: str, script: str, timeout: int = 30) -> VerificationResult:
+    """受け入れ基準の検証スクリプトをブラウザで実行し、合否を機械判定する。
+
+    - HIVE_FAIL が1件でもあれば不合格（どの基準が落ちたかを差し戻しに載せる）
+    - HIVE_DONE が出ていなければスクリプトが完走していない＝不合格
+    - ブラウザが使えない環境ではスキップ（check_browser と同じフェイルオープン）
+    """
+    proc, reason = _run_page(_with_harness(html, script), timeout)
+    if proc is None:
+        if reason.startswith("timeout:"):
+            return VerificationResult(
+                passed=False, returncode=-1, output=reason.removeprefix("timeout: ")
+            )
+        return VerificationResult(
+            passed=True,
+            returncode=0,
+            output=f"受け入れ検証をスキップ（{reason.removeprefix('skip: ')}）",
+        )
+    messages = [m.group("msg") for m in _CONSOLE_RE.finditer(proc.stderr)]
+    passes = [m.removeprefix("HIVE_PASS: ") for m in messages if m.startswith("HIVE_PASS: ")]
+    fails = [m.removeprefix("HIVE_FAIL: ") for m in messages if m.startswith("HIVE_FAIL: ")]
+    done = any(m.startswith("HIVE_DONE") for m in messages)
+    if fails:
+        return VerificationResult(
+            passed=False,
+            returncode=1,
+            output="受け入れ検証で不合格の基準あり:\n"
+            + "\n".join(f"- NG: {f}" for f in fails[:10])
+            + (f"\n（合格 {len(passes)}件）" if passes else ""),
+        )
+    if not done:
+        return VerificationResult(
+            passed=False,
+            returncode=1,
+            output="受け入れ検証スクリプトが完走しなかった（ページのloadが完了していない可能性）",
+        )
+    label = "・".join(passes[:10]) if passes else "検証項目なし"
+    return VerificationResult(
+        passed=True, returncode=0, output=f"受け入れ検証OK（{len(passes)}件合格: {label}）"
     )

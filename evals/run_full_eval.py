@@ -54,8 +54,8 @@ async def _run_once(task: str, task_type: str, thinking: str | None = None) -> d
 
 
 def _score_app(outputs: dict[str, str]):
-    """app タスクを出荷基準（構造＋ブラウザ実行・F-04 v2.9）で採点する。"""
-    from shared.runcheck import check_browser
+    """app タスクを出荷基準（構造＋ブラウザ実行＋受け入れ検証・F-04 v2.10）で採点する。"""
+    from shared.runcheck import check_acceptance, check_browser
     from shared.webcheck import check_app
 
     html = _extract(outputs, "implementer", "html")
@@ -63,7 +63,12 @@ def _score_app(outputs: dict[str, str]):
         return None
     persistence = _extract(outputs, "designer", "persistence").lower()
     result = check_app(html, persistence)
-    return check_browser(html) if result.passed else result
+    if result.passed:
+        result = check_browser(html)
+    script = _extract(outputs, "designer", "check_script")
+    if result.passed and script:
+        result = check_acceptance(html, script)
+    return result
 
 
 async def main() -> int:

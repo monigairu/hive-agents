@@ -123,7 +123,14 @@ class WebAppSpec(BaseModel):
     style_direction: str = Field(
         default="", description="画面の性格と配色3役・書体の方向性（web-designスキル）"
     )
-    notes: str = Field(default="", description="設計上の補足（ゲームならルールの要点等）")
+    check_script: str = Field(
+        default="",
+        description=(
+            "受け入れ基準をブラウザで機械検証するJavaScript（hiveAssert('基準名', 条件) の列・"
+            "F-04 v2.10）。操作する要素は notes に列挙した id で特定する"
+        ),
+    )
+    notes: str = Field(default="", description="設計上の補足（ゲームならルールの要点・検証で使う要素idの一覧等）")
 
 
 class AppDesignSpec(BaseModel):
