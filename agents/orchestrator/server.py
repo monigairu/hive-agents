@@ -155,6 +155,10 @@ _SECURITY = os.environ.get("HIVE_SECURITY", "1")
 _MEMORY_ON = os.environ.get("HIVE_MEMORY", "1") != "0"
 # F-01 発注ゲート（オフスイッチ）："0"で正規化を止め、発注の原文だけで実行する
 _INTAKE_ON = os.environ.get("HIVE_INTAKE", "1") != "0"
+# F-02 おまかせの節約モード（v2.10・実験スイッチ）："1"でE級appをFlash＋思考HIGHで作る。
+# 出荷基準evalの実測が 1/3（2026-07-09・単発実行）だったため既定はOFF＝最初からPro。
+# モデルが世代交代したら `HIVE_AUTO_ECON=1 make eval-full` で再実測して判断する
+_AUTO_ECON = os.environ.get("HIVE_AUTO_ECON", "0") == "1"
 # デモ/テスト用：最初の N 回の監査に合成のcritical指摘を注入し、差し戻しを観察できる。
 _DEMO_VULN = int(os.environ.get("HIVE_DEMO_VULN_ATTEMPTS", "0"))
 
@@ -302,7 +306,7 @@ _SAKUSEN = {
 _LEGACY_EFFORT = {"fast": "cost_saver", "best": "go_hard", "balanced": "adaptive"}
 
 
-def _effort_plan(effort: str, task_type: str, scale: str) -> dict:
+def _effort_plan(effort: str, task_type: str, scale: str, rank: str = "") -> dict:
     """「さくせん」（ユーザー選択のエフォート）を実行計画に解決する（F-02）。
 
     "auto"（おまかせ・既定）は router の判定で自動決定：アプリ（app/fullstack）と
@@ -310,25 +314,37 @@ def _effort_plan(effort: str, task_type: str, scale: str) -> dict:
     Pro に交代するより速く・安く・高品質に着地し、さらに app はゲームロジック等の
     正しさを機械オラクルで完全判定できないため、モデル品質で先に担保する（v2.9）。
 
+    例外＝節約モード（v2.10・HIVE_AUTO_ECON=1・既定OFF）：**E級のapp**だけを
+    Flash＋思考HIGH で作る実験。出荷基準evalの実測は 1/3（2026-07-09）で
+    「深く考えるFlash」でもProの代わりにならなかったため、既定では使わない。
+
     返り値（マッピング層のみ。モデル選択・パイプライン構成の既存ロジックは不変）:
     - designer / implementer: 使用モデル
     - escalate: F-13（Flash→Pro交代）を使うか
+    - thinking: 思考レベルの上書き（無ければランク連動の既定を使う）
     - force_security: F-15 監査を環境変数に関係なく強制ONにするか（all_hands）
     - tree_search: F-12（Rewind木探索）予約フラグ。実装後に all_hands で自動ON
     """
     effort = _LEGACY_EFFORT.get(effort, effort)
+    econ = False
     if effort not in _SAKUSEN or effort == "auto":
-        effort = (
-            "go_hard"
-            if (scale == "heavy" or task_type in ("app", "fullstack"))
-            else "adaptive"
-        )
+        econ = _AUTO_ECON and task_type == "app" and rank == "E"
+        if econ:
+            effort = "adaptive"
+        else:
+            effort = (
+                "go_hard"
+                if (scale == "heavy" or task_type in ("app", "fullstack"))
+                else "adaptive"
+            )
     base = {
         "effort": effort,
         "label": _SAKUSEN[effort],
         "force_security": False,
         "tree_search": False,
     }
+    if econ:
+        base["thinking"] = "HIGH"
     if effort == "all_hands":
         # いちばん丁寧：Pro＋セキュリティ監査強制（＋F-12は実装後にここでON）
         return base | {
@@ -369,9 +385,10 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
 
     feature_count = len(order.features) if order else 0
     rank = difficulty_rank(task_type, decision["scale"], feature_count)
-    # 討伐ランク連動の思考レベル（F-02）：むずかしいクエストほどモデルが深く考える
-    think = thinking_level(rank)
-    plan = _effort_plan(effort, task_type, decision["scale"])
+    plan = _effort_plan(effort, task_type, decision["scale"], rank)
+    # 思考レベル（F-02）：基本はランク連動（むずかしいほど深く考える）。
+    # 節約モード（E級app＝Flash）は思考HIGHで品質を補う（planが上書きを持つ）
+    think = plan.get("thinking") or thinking_level(rank)
     security_on = _SECURITY != "0" or plan["force_security"]
     security_full = (_SECURITY not in ("0", "pattern")) or plan["force_security"]
     # 編成（F-02 動的エージェント組成）：このタスクで働くAgentをUIに知らせる
