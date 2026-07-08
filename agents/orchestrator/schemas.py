@@ -19,6 +19,30 @@ class AgentPlan(BaseModel):
     scale: str = Field(description='"light" | "heavy"（動員規模）')
 
 
+class OrderSpec(BaseModel):
+    """発注ゲートの成果物：発注文の解釈＝「クエスト依頼書」（要件 F-01）。
+
+    ワークフロー起動前に発注文を正規化して designer に渡し、
+    「AIが発注をどう解釈したか」を order_spec イベントとしてUIに開示する（透明性）。
+    トリガー発注（F-01拡張・将来）の「自己完結した発注の原則」と同じ雛形：
+    チャット発注では不足を推測で補って assumed に開示し、トリガー発注では
+    同じ不足をエラーとして返す使い分けになる。
+    """
+
+    what: str = Field(description="何を作るか（1文・発注の言い換え）")
+    features: list[str] = Field(
+        default_factory=list, description="発注から読み取れる主要機能（3〜6個）"
+    )
+    success_criteria: list[str] = Field(
+        default_factory=list,
+        description="発注者自身がブラウザ操作等で確認できる成功条件",
+    )
+    assumed: list[str] = Field(
+        default_factory=list,
+        description="発注文に書かれておらず推測で補った重要事項（無ければ空）",
+    )
+
+
 class DesignSpec(BaseModel):
     """designer の成果物：設計仕様。"""
 

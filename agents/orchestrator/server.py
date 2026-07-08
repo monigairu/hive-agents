@@ -31,6 +31,7 @@ from starlette.routing import Route
 
 from agents.app.agent import make_app_implementer, make_frontend
 from agents.implementer.agent import make_implementer
+from agents.orchestrator.intake import make_intake, parse_order, render_order
 from agents.orchestrator.router import classify, difficulty_rank
 from agents.orchestrator.workflow import build_workflow
 from agents.reflection.agent import make_reflection
@@ -152,6 +153,8 @@ _DEMO_FAIL = int(os.environ.get("HIVE_DEMO_FAIL_ATTEMPTS", "0"))
 _SECURITY = os.environ.get("HIVE_SECURITY", "1")
 # F-08 経験の学習（オフスイッチ）："0"で想起・記録を丸ごと止め、学習あり/なしをA/B比較できる
 _MEMORY_ON = os.environ.get("HIVE_MEMORY", "1") != "0"
+# F-01 発注ゲート（オフスイッチ）："0"で正規化を止め、発注の原文だけで実行する
+_INTAKE_ON = os.environ.get("HIVE_INTAKE", "1") != "0"
 # デモ/テスト用：最初の N 回の監査に合成のcritical指摘を注入し、差し戻しを観察できる。
 _DEMO_VULN = int(os.environ.get("HIVE_DEMO_VULN_ATTEMPTS", "0"))
 
@@ -368,12 +371,27 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
         party=[{"agent": a, "role": AGENT_ROLE.get(a, "")} for a in party],
     )
 
+    # 発注ゲート（F-01）：発注文を「クエスト依頼書」に正規化し、解釈をUIに開示する。
+    # 解釈に失敗しても止めず、原文だけで進める（フェイルオープン）
+    order = None
+    if _INTAKE_ON:
+        yield _sse("intake_start")
+        try:
+            order = parse_order(await _run_silent(make_intake(), task))
+        except Exception:  # noqa: BLE001 - 受付の不調は「原文で続行」に倒す
+            order = None
+        if order:
+            yield _sse("order_spec", **order.model_dump())
+        else:
+            # 解釈できなかった合図（UIは受付カードを閉じるだけ）
+            yield _sse("order_spec", what="")
+
     # 経験の想起（F-08）：同種タスクの教訓を検索し、タスク文の先頭に注入する
     # （HIVE_MEMORY=0 で丸ごと無効化＝学習あり/なしのA/B比較用オフスイッチ）
     memories = _bank.retrieve(task, task_type) if _MEMORY_ON else []
     if memories:
         yield _sse("memory_recall", lessons=[m.title for m in memories])
-    base_prompt = render_memories(memories) + task
+    base_prompt = render_memories(memories) + (render_order(order) if order else "") + task
 
     outputs: dict[str, str] = {}
     failure_notes: list[str] = []  # 差し戻し理由の記録（F-08 蒸留の材料・機械産の情報のみ）

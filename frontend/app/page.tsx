@@ -42,6 +42,15 @@ type TimelineItem =
       model: string;
       party: string[];
     }
+  | { id: number; kind: "intaking" }
+  | {
+      id: number;
+      kind: "order";
+      what: string;
+      features: string[];
+      successCriteria: string[];
+      assumed: string[];
+    }
   | { id: number; kind: "recall"; lessons: string[] }
   | { id: number; kind: "thinking"; agent: string; role: string }
   | { id: number; kind: "output"; agent: string; role: string; text: string }
@@ -85,6 +94,25 @@ function applyEvent(prev: TimelineItem[], type: string, d: any): TimelineItem[] 
           model: String(d.model ?? "").includes("pro") ? "Pro" : "Flash",
           party: ((d.party as { agent: string }[]) ?? []).map((p) => labelOf(p.agent)),
         },
+      ];
+    case "intake_start":
+      return [...prev, { id: nextId(), kind: "intaking" }];
+    case "order_spec":
+      // 受付中カードを閉じる。解釈できなかったとき（what空）は依頼書を出さず原文で進む
+      return [
+        ...prev.filter((it) => it.kind !== "intaking"),
+        ...(d.what
+          ? [
+              {
+                id: nextId(),
+                kind: "order" as const,
+                what: d.what as string,
+                features: (d.features as string[]) ?? [],
+                successCriteria: (d.success_criteria as string[]) ?? [],
+                assumed: (d.assumed as string[]) ?? [],
+              },
+            ]
+          : []),
       ];
     case "memory_recall":
       return [...prev, { id: nextId(), kind: "recall", lessons: d.lessons ?? [] }];
@@ -338,6 +366,45 @@ function renderItem(it: TimelineItem) {
           → はたらきバチを編成
           {it.party.length > 0 && (
             <span className="ml-1">（{it.party.join("・")}）</span>
+          )}
+        </div>
+      );
+    case "intaking":
+      return (
+        <Card>
+          <div className="flex w-16 shrink-0 flex-col items-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-neutral-100 text-2xl ring-2 ring-amber-300 dark:bg-neutral-800">
+              📋
+            </div>
+            <span className="mt-1 text-[10px] text-neutral-500">受付</span>
+          </div>
+          <div className="flex items-center text-sm text-neutral-500">
+            受付が 依頼内容を せいりしている
+            <span className="ml-1 inline-flex animate-pulse">…</span>
+          </div>
+        </Card>
+      );
+    case "order":
+      return (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/60 px-4 py-3 text-sm text-neutral-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-neutral-200">
+          <div className="font-semibold">📋 クエスト依頼書（発注の解釈）</div>
+          <p className="mt-1">{it.what}</p>
+          {it.features.length > 0 && (
+            <ul className="mt-1 list-disc pl-5 text-neutral-600 dark:text-neutral-400">
+              {it.features.map((f, i) => (
+                <li key={i}>{f}</li>
+              ))}
+            </ul>
+          )}
+          {it.successCriteria.length > 0 && (
+            <p className="mt-1 text-xs text-neutral-500">
+              ✅ 成功条件：{it.successCriteria.join(" ／ ")}
+            </p>
+          )}
+          {it.assumed.length > 0 && (
+            <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+              💡 発注文に無かったので補った点：{it.assumed.join(" ／ ")}
+            </p>
           )}
         </div>
       );

@@ -28,6 +28,8 @@ const HISTORY_LIMIT = 10;
 const EVENT_NAMES = [
   "task_received",
   "router",
+  "intake_start",
+  "order_spec",
   "memory_recall",
   "agent_start",
   "agent_output",
