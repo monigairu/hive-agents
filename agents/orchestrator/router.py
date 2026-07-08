@@ -58,6 +58,16 @@ def difficulty_rank(task_type: str, scale: str) -> str:
     return {0: "E", 1: "C", 2: "S"}[points]
 
 
+def thinking_level(rank: str) -> str:
+    """討伐ランク→モデルの思考レベル（Gemini 3 の thinking_level・F-02）。
+
+    むずかしいクエストほど深く考える：E=LOW / C=MEDIUM / S=HIGH。
+    「さくせん」とは独立した軸：モデルの種類（Flash/Pro）はさくせんが、
+    思考の深さはランクが決める。routerイベントに載せてUIにも開示する。
+    """
+    return {"E": "LOW", "C": "MEDIUM", "S": "HIGH"}.get(rank, "MEDIUM")
+
+
 def route_task(node_input: str) -> str:
     """ユーザーのタスク文を受け取り、種別・規模を判定して本文を後続へ渡す。
 

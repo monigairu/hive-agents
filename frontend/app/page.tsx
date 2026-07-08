@@ -38,6 +38,7 @@ type TimelineItem =
       taskType: string;
       scale: string;
       rank: string;
+      thinking: string;
       sakusen: string;
       model: string;
       party: string[];
@@ -90,6 +91,7 @@ function applyEvent(prev: TimelineItem[], type: string, d: any): TimelineItem[] 
           taskType: d.task_type,
           scale: d.scale,
           rank: d.rank ?? "",
+          thinking: d.thinking ?? "",
           sakusen: d.sakusen ?? d.quality ?? "",
           model: String(d.model ?? "").includes("pro") ? "Pro" : "Flash",
           party: ((d.party as { agent: string }[]) ?? []).map((p) => labelOf(p.agent)),
@@ -362,7 +364,8 @@ function renderItem(it: TimelineItem) {
               {" "}
               ・さくせん <b>{it.sakusen}</b>（{it.model}）
             </span>
-          )}{" "}
+          )}
+          {it.thinking && <span> ・思考レベル {it.thinking}</span>}{" "}
           → はたらきバチを編成
           {it.party.length > 0 && (
             <span className="ml-1">（{it.party.join("・")}）</span>

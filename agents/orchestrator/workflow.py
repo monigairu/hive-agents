@@ -53,20 +53,27 @@ def build_workflow(
     task_type: str = "api",
     designer_model: str | None = None,
     implementer_model: str | None = None,
+    thinking: str | None = None,
 ) -> Workflow:
     """タスク種別に応じたパイプラインのグラフを組む（F-02 差し込み式）。
 
     ルーティング判断は呼び出し側が router.classify で行い（コスト$0・決定論的）、
     モデルは品質レベル（F-02：ユーザー選択＋自動判定）に応じて差し替える。
+    thinking は討伐ランク連動の思考レベル（router.thinking_level）。designer /
+    implementer に設定する（A2Aモードのノードはリモート側の既定が使われる）。
     - app: webapp designer → webapp implementer（既定・v2.9。ブラウザ完結の単一HTMLアプリ）
     - api: designer → implementer → tester（A2A切り替え対応）
     - lp : web designer → web implementer（M8。当面プロセス内実行のみ）
     - fullstack: app designer → app implementer → tester（frontend は後段で orchestrator が起動）
     """
-    from shared.models import FLASH
+    from shared.models import FLASH, with_thinking
 
     d_model = designer_model or FLASH
     i_model = implementer_model or FLASH
+
+    def _t(agent):
+        """このクエストの思考レベルをAgentに適用する（None なら素通し）。"""
+        return with_thinking(agent, thinking)
     # 注意：グラフのノードは必ず「呼び出しごとに新しいAgentインスタンス」を使う。
     # Workflow はAgentにモード等の状態を持たせるため、インスタンスを複数のグラフで
     # 使い回すと2つ目以降の構築が "mode='chat'" の検証エラーで落ちる。
@@ -80,8 +87,8 @@ def build_workflow(
                 (
                     "START",
                     route_task,
-                    make_webapp_designer(d_model),
-                    make_webapp_implementer(i_model),
+                    _t(make_webapp_designer(d_model)),
+                    _t(make_webapp_implementer(i_model)),
                 ),
             ],
         )
@@ -95,8 +102,8 @@ def build_workflow(
                 (
                     "START",
                     route_task,
-                    make_app_designer(d_model),
-                    make_app_implementer(i_model),
+                    _t(make_app_designer(d_model)),
+                    _t(make_app_implementer(i_model)),
                     make_tester(),
                 ),
             ],
@@ -109,11 +116,11 @@ def build_workflow(
             name="hive_orchestrator",
             description="自然言語の発注をWebページパイプライン(designer→implementer)で処理する",
             edges=[
-                ("START", route_task, make_web_designer(d_model), make_web_implementer(i_model)),
+                ("START", route_task, _t(make_web_designer(d_model)), _t(make_web_implementer(i_model))),
             ],
         )
-    designer = _node(make_designer(d_model), "designer")
-    implementer = _node(make_implementer(i_model), "implementer")
+    designer = _node(_t(make_designer(d_model)), "designer")
+    implementer = _node(_t(make_implementer(i_model)), "implementer")
     tester = _node(make_tester(), "tester")
     return Workflow(
         name="hive_orchestrator",

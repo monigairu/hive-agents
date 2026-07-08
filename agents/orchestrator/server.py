@@ -32,7 +32,7 @@ from starlette.routing import Route
 from agents.app.agent import make_app_implementer, make_frontend
 from agents.implementer.agent import make_implementer
 from agents.orchestrator.intake import make_intake, parse_order, render_order
-from agents.orchestrator.router import classify, difficulty_rank
+from agents.orchestrator.router import classify, difficulty_rank, thinking_level
 from agents.orchestrator.workflow import build_workflow
 from agents.reflection.agent import make_reflection
 from agents.security_reviewer.agent import security_reviewer_agent
@@ -40,7 +40,7 @@ from agents.tester.agent import tester_agent
 from agents.web.agent import make_web_implementer
 from agents.webapp.agent import make_webapp_implementer
 from shared.memory import ReasoningBank, acceptable_lesson, render_memories
-from shared.models import FLASH, PRO
+from shared.models import FLASH, PRO, with_thinking
 from shared.runcheck import check_browser
 from shared.sandbox import VerificationResult, verify_fastapi
 from shared.webcheck import check_app, check_frontend, check_web
@@ -351,6 +351,8 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
     decision = classify(task)
     task_type = decision["task_type"]
     rank = difficulty_rank(task_type, decision["scale"])
+    # 討伐ランク連動の思考レベル（F-02）：むずかしいクエストほどモデルが深く考える
+    think = thinking_level(rank)
     plan = _effort_plan(effort, task_type, decision["scale"])
     security_on = _SECURITY != "0" or plan["force_security"]
     security_full = (_SECURITY not in ("0", "pattern")) or plan["force_security"]
@@ -363,6 +365,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
         task_type=task_type,
         scale=decision["scale"],
         rank=rank,
+        thinking=think,
         effort=plan["effort"],
         sakusen=plan["label"],
         # 互換: v2.8初版のUI（quality表示）も壊さない
@@ -399,7 +402,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
     try:
         # 試行1：WorkflowAgent グラフ（タスク種別＋品質レベルに応じたパイプライン・F-02）
         runner = InMemoryRunner(
-            agent=build_workflow(task_type, plan["designer"], plan["implementer"]),
+            agent=build_workflow(task_type, plan["designer"], plan["implementer"], think),
             app_name=APP_NAME,
         )
         session = await runner.session_service.create_session(app_name=APP_NAME, user_id="ui")
@@ -438,9 +441,9 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
             factory = _IMPL_FACTORY[task_type]
             if plan["escalate"] and next_attempt == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
                 yield _sse("escalation", agent="implementer", to_model=PRO)
-                implementer = factory(PRO)
+                implementer = with_thinking(factory(PRO), think)
             else:
-                implementer = factory(plan["implementer"])
+                implementer = with_thinking(factory(plan["implementer"]), think)
             fix_prompt = (
                 f"{base_prompt}\n\n[設計]\n{design}\n\n"
                 f"[前回の実装]\n{_field(outputs.get('implementer'), result_key)}\n\n"
@@ -598,7 +601,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                 f"{base_prompt}\n\n[設計]\n{design}\n\n{contract}\n\n"
                 "この契約どおりにAPIを呼び出す画面（単一ファイルの index.html）を実装してください。"
             )
-            frontend = make_frontend(plan["implementer"])
+            frontend = with_thinking(make_frontend(plan["implementer"]), think)
             for fe_attempt in range(1, MAX_ATTEMPTS + 1):
                 fe_out: dict = {}
                 async for ev in _invoke(frontend, fe_prompt, fe_out):
@@ -629,7 +632,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                 )
                 if plan["escalate"] and fe_attempt + 1 == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
                     yield _sse("escalation", agent="frontend", to_model=PRO)
-                    frontend = make_frontend(PRO)
+                    frontend = with_thinking(make_frontend(PRO), think)
                 fe_prompt = (
                     f"{base_prompt}\n\n[設計]\n{design}\n\n{contract}\n\n"
                     f"[前回の画面実装]\n{html}\n\n"

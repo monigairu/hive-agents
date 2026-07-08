@@ -25,18 +25,22 @@ _INSTRUCTION = (
 
 
 def make_intake(model: str | None = None):
-    """受付Agentを生成する。google-adk は遅延import（tests/ の隔離実行を保つため）。"""
+    """受付Agentを生成する。google-adk は遅延import（tests/ の隔離実行を保つため）。
+
+    受付は整理だけの内部処理なので思考レベルは常に MINIMAL（速い・安い）。
+    """
     from google.adk import Agent
 
-    from shared.models import FLASH
+    from shared.models import FLASH, with_thinking
 
-    return Agent(
+    agent = Agent(
         name="intake",
         model=model or FLASH,
         description="発注文をクエスト依頼書（OrderSpec）に正規化する受付担当",
         output_schema=OrderSpec,
         instruction=_INSTRUCTION,
     )
+    return with_thinking(agent, "MINIMAL")
 
 
 def parse_order(text: str | None) -> OrderSpec | None:
