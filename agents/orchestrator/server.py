@@ -32,7 +32,7 @@ from starlette.routing import Route
 from agents.app.agent import make_app_implementer, make_frontend
 from agents.implementer.agent import make_implementer
 from agents.orchestrator.intake import make_intake, parse_order, render_order
-from agents.orchestrator.router import classify, difficulty_rank, thinking_level
+from agents.orchestrator.router import classify, difficulty_rank, rank_reasons, thinking_level
 from agents.orchestrator.workflow import build_workflow
 from agents.reflection.agent import make_reflection
 from agents.security_reviewer.agent import security_reviewer_agent
@@ -350,7 +350,25 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
     yield _sse("task_received", task=task)
     decision = classify(task)
     task_type = decision["task_type"]
-    rank = difficulty_rank(task_type, decision["scale"])
+
+    # 発注ゲート（F-01）：発注文を「クエスト依頼書」に正規化し、解釈をUIに開示する。
+    # 依頼書の機能数は討伐ランクの判定材料にもなる（F-02）。
+    # 解釈に失敗しても止めず、原文だけで進める（フェイルオープン）
+    order = None
+    if _INTAKE_ON:
+        yield _sse("intake_start")
+        try:
+            order = parse_order(await _run_silent(make_intake(), task))
+        except Exception:  # noqa: BLE001 - 受付の不調は「原文で続行」に倒す
+            order = None
+        if order:
+            yield _sse("order_spec", **order.model_dump())
+        else:
+            # 解釈できなかった合図（UIは受付カードを閉じるだけ）
+            yield _sse("order_spec", what="")
+
+    feature_count = len(order.features) if order else 0
+    rank = difficulty_rank(task_type, decision["scale"], feature_count)
     # 討伐ランク連動の思考レベル（F-02）：むずかしいクエストほどモデルが深く考える
     think = thinking_level(rank)
     plan = _effort_plan(effort, task_type, decision["scale"])
@@ -365,6 +383,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
         task_type=task_type,
         scale=decision["scale"],
         rank=rank,
+        rank_basis="・".join(rank_reasons(task_type, decision["scale"], feature_count)),
         thinking=think,
         effort=plan["effort"],
         sakusen=plan["label"],
@@ -373,21 +392,6 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
         model=plan["implementer"],
         party=[{"agent": a, "role": AGENT_ROLE.get(a, "")} for a in party],
     )
-
-    # 発注ゲート（F-01）：発注文を「クエスト依頼書」に正規化し、解釈をUIに開示する。
-    # 解釈に失敗しても止めず、原文だけで進める（フェイルオープン）
-    order = None
-    if _INTAKE_ON:
-        yield _sse("intake_start")
-        try:
-            order = parse_order(await _run_silent(make_intake(), task))
-        except Exception:  # noqa: BLE001 - 受付の不調は「原文で続行」に倒す
-            order = None
-        if order:
-            yield _sse("order_spec", **order.model_dump())
-        else:
-            # 解釈できなかった合図（UIは受付カードを閉じるだけ）
-            yield _sse("order_spec", what="")
 
     # 経験の想起（F-08）：同種タスクの教訓を検索し、タスク文の先頭に注入する
     # （HIVE_MEMORY=0 で丸ごと無効化＝学習あり/なしのA/B比較用オフスイッチ）

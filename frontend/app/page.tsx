@@ -38,6 +38,7 @@ type TimelineItem =
       taskType: string;
       scale: string;
       rank: string;
+      rankBasis: string;
       thinking: string;
       sakusen: string;
       model: string;
@@ -91,6 +92,7 @@ function applyEvent(prev: TimelineItem[], type: string, d: any): TimelineItem[] 
           taskType: d.task_type,
           scale: d.scale,
           rank: d.rank ?? "",
+          rankBasis: d.rank_basis ?? "",
           thinking: d.thinking ?? "",
           sakusen: d.sakusen ?? d.quality ?? "",
           model: String(d.model ?? "").includes("pro") ? "Pro" : "Flash",
@@ -357,7 +359,8 @@ function renderItem(it: TimelineItem) {
       return (
         <div className="text-center text-xs text-neutral-500">
           ⚙️ ルーター判定：討伐ランク{" "}
-          <b className="text-amber-600">{it.rank || "?"}</b>（種別 {it.taskType} / 規模{" "}
+          <b className="text-amber-600">{it.rank || "?"}</b>
+          {it.rankBasis && <span>（加点: {it.rankBasis}）</span>}（種別 {it.taskType} / 規模{" "}
           {it.scale}）
           {it.sakusen && (
             <span>
