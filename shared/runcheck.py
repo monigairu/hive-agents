@@ -59,6 +59,24 @@ def _browser_env() -> dict[str, str]:
     return env
 
 
+def _has_visible_content(dom: str) -> bool:
+    """描画後のDOMに「見えるもの」があるか（出荷基準・白画面の検出・v2.10）。
+
+    script/style を除いた body に、視覚要素（canvas・button等）か表示テキストが
+    あれば良しとする。「JSエラーは無いのに body が空のまま」だけを落とす
+    （正当な最小ページを誤って差し戻さない＝誤検知ゼロを優先）。
+    """
+    m = re.search(r"<body[^>]*>(.*)</body>", dom, re.S | re.I)
+    content = m.group(1) if m else ""
+    content = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", content, flags=re.S | re.I)
+    if re.search(
+        r"<(canvas|button|input|select|textarea|table|svg|img|video)\b", content, re.I
+    ):
+        return True
+    text = re.sub(r"<[^>]+>", "", content)
+    return bool(re.sub(r"\s+", "", text))
+
+
 def _console_errors(stderr: str) -> list[str]:
     """stderr のコンソールログからJSエラー行を抜き出す。"""
     errors: list[str] = []
@@ -114,6 +132,15 @@ def check_browser(html: str, timeout: int = 30) -> VerificationResult:
             returncode=1,
             output="ブラウザ実行でJSエラーを検出（開いた瞬間に壊れている）:\n"
             + "\n".join(f"- {e}" for e in errors[:10]),
+        )
+    if not _has_visible_content(proc.stdout):
+        return VerificationResult(
+            passed=False,
+            returncode=1,
+            output=(
+                "ブラウザ実行でJSエラーは無いが、画面に何も表示されていない（白画面）。\n"
+                "- body に見える要素（canvas・button・テキスト等）を描画すること"
+            ),
         )
     rendered = len(re.sub(r"\s+", "", proc.stdout))
     return VerificationResult(

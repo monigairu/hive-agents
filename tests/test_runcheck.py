@@ -64,3 +64,34 @@ def test_check_browser_detects_js_error():
     result = check_browser(_BROKEN_HTML)
     assert not result.passed
     assert "JSエラー" in result.output
+
+
+# --- 白画面検出（出荷基準・v2.10） ------------------------------------------
+
+from shared.runcheck import _has_visible_content  # noqa: E402
+
+_BLANK_HTML = (
+    '<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8"><title>blank</title></head>'
+    "<body><script>console.log('loaded but renders nothing');</script></body></html>"
+)
+
+
+def test_visible_content_detects_elements_and_text():
+    assert _has_visible_content("<html><body><canvas></canvas></body></html>")
+    assert _has_visible_content("<html><body><button>置く</button></body></html>")
+    assert _has_visible_content("<html><body><h1>ok</h1></body></html>")
+
+
+def test_visible_content_rejects_blank_and_script_only():
+    assert not _has_visible_content("<html><body></body></html>")
+    assert not _has_visible_content("<html><body>   \n  </body></html>")
+    assert not _has_visible_content(
+        "<html><body><script>const s = 'テキストに見えるがscript内';</script></body></html>"
+    )
+
+
+@_needs_browser
+def test_check_browser_detects_blank_screen():
+    result = check_browser(_BLANK_HTML)
+    assert not result.passed
+    assert "白画面" in result.output
