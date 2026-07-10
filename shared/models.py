@@ -13,3 +13,18 @@ import os
 
 FLASH: str = os.environ.get("HIVE_MODEL_FLASH", "gemini-3.5-flash")
 PRO: str = os.environ.get("HIVE_MODEL_PRO", "gemini-3.1-pro-preview")
+
+
+def with_thinking(agent, level: str | None):
+    """Agentに思考レベル（Gemini 3 の thinking_level）を設定して返す（F-02）。
+
+    level は "MINIMAL" | "LOW" | "MEDIUM" | "HIGH"。None なら何もしない
+    （モデル既定のまま）。google-genai は遅延import（tests/ の隔離実行を保つため）。
+    """
+    if level:
+        from google.genai import types
+
+        agent.generate_content_config = types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_level=level)
+        )
+    return agent

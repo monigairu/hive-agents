@@ -45,17 +45,41 @@ def classify(text: str) -> dict[str, str]:
     return {"task_type": task_type, "scale": scale}
 
 
-def difficulty_rank(task_type: str, scale: str) -> str:
+def rank_reasons(task_type: str, scale: str, feature_count: int = 0) -> list[str]:
+    """討伐ランクの加点内訳（UIにそのまま出せる日本語・F-02）。
+
+    feature_count は発注ゲート（F-01）が依頼書に起こした主要機能の数。
+    受付が失敗したときは 0 のまま＝従来どおり種別と長さだけで判定する。
+    """
+    reasons = []
+    if task_type == "fullstack":
+        reasons.append("API+画面の2成果物")
+    if scale == "heavy":
+        reasons.append("大きな発注文")
+    if feature_count >= 6:
+        reasons.append(f"機能が多い（{feature_count}個）")
+    return reasons
+
+
+def difficulty_rank(task_type: str, scale: str, feature_count: int = 0) -> str:
     """クエスト難易度＝討伐ランク（E/C/S）を決定論で判定する（F-02）。
 
     ユーザーが選ぶ「さくせん（エフォート）」とは独立した軸で、
-    発注内容そのものの重さを表す。加点式で透明性を保つ：
-    - フルスタック（fullstack）＝API+画面の2成果物 → +1
-    - 大規模な発注（scale=heavy） → +1
-    0点=E（かんたん）/ 1点=C（ふつう）/ 2点=S（むずかしい）
+    発注内容そのものの重さを表す。加点式で透明性を保つ（内訳は rank_reasons）：
+    0点=E（かんたん）/ 1点=C（ふつう）/ 2点以上=S（むずかしい）
     """
-    points = (1 if task_type == "fullstack" else 0) + (1 if scale == "heavy" else 0)
-    return {0: "E", 1: "C", 2: "S"}[points]
+    points = len(rank_reasons(task_type, scale, feature_count))
+    return {0: "E", 1: "C"}.get(points, "S")
+
+
+def thinking_level(rank: str) -> str:
+    """討伐ランク→モデルの思考レベル（Gemini 3 の thinking_level・F-02）。
+
+    むずかしいクエストほど深く考える：E=LOW / C=MEDIUM / S=HIGH。
+    「さくせん」とは独立した軸：モデルの種類（Flash/Pro）はさくせんが、
+    思考の深さはランクが決める。routerイベントに載せてUIにも開示する。
+    """
+    return {"E": "LOW", "C": "MEDIUM", "S": "HIGH"}.get(rank, "MEDIUM")
 
 
 def route_task(node_input: str) -> str:

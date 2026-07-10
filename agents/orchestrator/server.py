@@ -31,7 +31,8 @@ from starlette.routing import Route
 
 from agents.app.agent import make_app_implementer, make_frontend
 from agents.implementer.agent import make_implementer
-from agents.orchestrator.router import classify, difficulty_rank
+from agents.orchestrator.intake import make_intake, parse_order, render_order
+from agents.orchestrator.router import classify, difficulty_rank, rank_reasons, thinking_level
 from agents.orchestrator.workflow import build_workflow
 from agents.reflection.agent import make_reflection
 from agents.security_reviewer.agent import security_reviewer_agent
@@ -39,8 +40,9 @@ from agents.tester.agent import tester_agent
 from agents.web.agent import make_web_implementer
 from agents.webapp.agent import make_webapp_implementer
 from shared.memory import ReasoningBank, acceptable_lesson, render_memories
-from shared.models import FLASH, PRO
-from shared.runcheck import check_browser
+from shared.models import FLASH, PRO, with_thinking
+from shared.layoutcheck import check_layout
+from shared.runcheck import check_acceptance, check_browser
 from shared.sandbox import VerificationResult, verify_fastapi
 from shared.webcheck import check_app, check_frontend, check_web
 from shared.security_patterns import (
@@ -152,6 +154,14 @@ _DEMO_FAIL = int(os.environ.get("HIVE_DEMO_FAIL_ATTEMPTS", "0"))
 _SECURITY = os.environ.get("HIVE_SECURITY", "1")
 # F-08 経験の学習（オフスイッチ）："0"で想起・記録を丸ごと止め、学習あり/なしをA/B比較できる
 _MEMORY_ON = os.environ.get("HIVE_MEMORY", "1") != "0"
+# F-01 発注ゲート（オフスイッチ）："0"で正規化を止め、発注の原文だけで実行する
+_INTAKE_ON = os.environ.get("HIVE_INTAKE", "1") != "0"
+# F-04 スマホ表示のvision判定（v2.10・レポートのみ）："0"でスクショ判定を止める
+_LAYOUT_ON = os.environ.get("HIVE_LAYOUT", "1") != "0"
+# F-02 おまかせの節約モード（v2.10・実験スイッチ）："1"でE級appをFlash＋思考HIGHで作る。
+# 出荷基準evalの実測が 1/3（2026-07-09・単発実行）だったため既定はOFF＝最初からPro。
+# モデルが世代交代したら `HIVE_AUTO_ECON=1 make eval-full` で再実測して判断する
+_AUTO_ECON = os.environ.get("HIVE_AUTO_ECON", "0") == "1"
 # デモ/テスト用：最初の N 回の監査に合成のcritical指摘を注入し、差し戻しを観察できる。
 _DEMO_VULN = int(os.environ.get("HIVE_DEMO_VULN_ATTEMPTS", "0"))
 
@@ -299,7 +309,7 @@ _SAKUSEN = {
 _LEGACY_EFFORT = {"fast": "cost_saver", "best": "go_hard", "balanced": "adaptive"}
 
 
-def _effort_plan(effort: str, task_type: str, scale: str) -> dict:
+def _effort_plan(effort: str, task_type: str, scale: str, rank: str = "") -> dict:
     """「さくせん」（ユーザー選択のエフォート）を実行計画に解決する（F-02）。
 
     "auto"（おまかせ・既定）は router の判定で自動決定：アプリ（app/fullstack）と
@@ -307,25 +317,37 @@ def _effort_plan(effort: str, task_type: str, scale: str) -> dict:
     Pro に交代するより速く・安く・高品質に着地し、さらに app はゲームロジック等の
     正しさを機械オラクルで完全判定できないため、モデル品質で先に担保する（v2.9）。
 
+    例外＝節約モード（v2.10・HIVE_AUTO_ECON=1・既定OFF）：**E級のapp**だけを
+    Flash＋思考HIGH で作る実験。出荷基準evalの実測は 1/3（2026-07-09）で
+    「深く考えるFlash」でもProの代わりにならなかったため、既定では使わない。
+
     返り値（マッピング層のみ。モデル選択・パイプライン構成の既存ロジックは不変）:
     - designer / implementer: 使用モデル
     - escalate: F-13（Flash→Pro交代）を使うか
+    - thinking: 思考レベルの上書き（無ければランク連動の既定を使う）
     - force_security: F-15 監査を環境変数に関係なく強制ONにするか（all_hands）
     - tree_search: F-12（Rewind木探索）予約フラグ。実装後に all_hands で自動ON
     """
     effort = _LEGACY_EFFORT.get(effort, effort)
+    econ = False
     if effort not in _SAKUSEN or effort == "auto":
-        effort = (
-            "go_hard"
-            if (scale == "heavy" or task_type in ("app", "fullstack"))
-            else "adaptive"
-        )
+        econ = _AUTO_ECON and task_type == "app" and rank == "E"
+        if econ:
+            effort = "adaptive"
+        else:
+            effort = (
+                "go_hard"
+                if (scale == "heavy" or task_type in ("app", "fullstack"))
+                else "adaptive"
+            )
     base = {
         "effort": effort,
         "label": _SAKUSEN[effort],
         "force_security": False,
         "tree_search": False,
     }
+    if econ:
+        base["thinking"] = "HIGH"
     if effort == "all_hands":
         # いちばん丁寧：Pro＋セキュリティ監査強制（＋F-12は実装後にここでON）
         return base | {
@@ -347,8 +369,29 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
     yield _sse("task_received", task=task)
     decision = classify(task)
     task_type = decision["task_type"]
-    rank = difficulty_rank(task_type, decision["scale"])
-    plan = _effort_plan(effort, task_type, decision["scale"])
+
+    # 発注ゲート（F-01）：発注文を「クエスト依頼書」に正規化し、解釈をUIに開示する。
+    # 依頼書の機能数は討伐ランクの判定材料にもなる（F-02）。
+    # 解釈に失敗しても止めず、原文だけで進める（フェイルオープン）
+    order = None
+    if _INTAKE_ON:
+        yield _sse("intake_start")
+        try:
+            order = parse_order(await _run_silent(make_intake(), task))
+        except Exception:  # noqa: BLE001 - 受付の不調は「原文で続行」に倒す
+            order = None
+        if order:
+            yield _sse("order_spec", **order.model_dump())
+        else:
+            # 解釈できなかった合図（UIは受付カードを閉じるだけ）
+            yield _sse("order_spec", what="")
+
+    feature_count = len(order.features) if order else 0
+    rank = difficulty_rank(task_type, decision["scale"], feature_count)
+    plan = _effort_plan(effort, task_type, decision["scale"], rank)
+    # 思考レベル（F-02）：基本はランク連動（むずかしいほど深く考える）。
+    # 節約モード（E級app＝Flash）は思考HIGHで品質を補う（planが上書きを持つ）
+    think = plan.get("thinking") or thinking_level(rank)
     security_on = _SECURITY != "0" or plan["force_security"]
     security_full = (_SECURITY not in ("0", "pattern")) or plan["force_security"]
     # 編成（F-02 動的エージェント組成）：このタスクで働くAgentをUIに知らせる
@@ -360,6 +403,8 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
         task_type=task_type,
         scale=decision["scale"],
         rank=rank,
+        rank_basis="・".join(rank_reasons(task_type, decision["scale"], feature_count)),
+        thinking=think,
         effort=plan["effort"],
         sakusen=plan["label"],
         # 互換: v2.8初版のUI（quality表示）も壊さない
@@ -373,7 +418,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
     memories = _bank.retrieve(task, task_type) if _MEMORY_ON else []
     if memories:
         yield _sse("memory_recall", lessons=[m.title for m in memories])
-    base_prompt = render_memories(memories) + task
+    base_prompt = render_memories(memories) + (render_order(order) if order else "") + task
 
     outputs: dict[str, str] = {}
     failure_notes: list[str] = []  # 差し戻し理由の記録（F-08 蒸留の材料・機械産の情報のみ）
@@ -381,7 +426,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
     try:
         # 試行1：WorkflowAgent グラフ（タスク種別＋品質レベルに応じたパイプライン・F-02）
         runner = InMemoryRunner(
-            agent=build_workflow(task_type, plan["designer"], plan["implementer"]),
+            agent=build_workflow(task_type, plan["designer"], plan["implementer"], think),
             app_name=APP_NAME,
         )
         session = await runner.session_service.create_session(app_name=APP_NAME, user_id="ui")
@@ -420,9 +465,9 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
             factory = _IMPL_FACTORY[task_type]
             if plan["escalate"] and next_attempt == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
                 yield _sse("escalation", agent="implementer", to_model=PRO)
-                implementer = factory(PRO)
+                implementer = with_thinking(factory(PRO), think)
             else:
-                implementer = factory(plan["implementer"])
+                implementer = with_thinking(factory(plan["implementer"]), think)
             fix_prompt = (
                 f"{base_prompt}\n\n[設計]\n{design}\n\n"
                 f"[前回の実装]\n{_field(outputs.get('implementer'), result_key)}\n\n"
@@ -531,6 +576,25 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                         returncode=browser_result.returncode,
                         output=f"{result.output}\n{browser_result.output}",
                     )
+                # 第3段オラクル（F-04・v2.10）：designerが書いた受け入れ検証スクリプトを
+                # ブラウザで実行し「要求どおり操作できるか」を機械採点する
+                check_script = _field(outputs.get("designer"), "check_script")
+                if result.passed and check_script:
+                    acc = await asyncio.to_thread(check_acceptance, code, check_script)
+                    result = VerificationResult(
+                        passed=acc.passed,
+                        returncode=acc.returncode,
+                        output=f"{result.output}\n{acc.output}",
+                    )
+                # スマホ表示のvision判定（F-04・v2.10）：レポートのみ＝合否は変えない
+                if result.passed and _LAYOUT_ON:
+                    layout_note = await asyncio.to_thread(check_layout, code)
+                    if layout_note:
+                        result = VerificationResult(
+                            passed=True,
+                            returncode=0,
+                            output=f"{result.output}\n{layout_note}",
+                        )
             else:
                 result = await _verify(code, test_code, attempt)
             yield _sse(
@@ -580,7 +644,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                 f"{base_prompt}\n\n[設計]\n{design}\n\n{contract}\n\n"
                 "この契約どおりにAPIを呼び出す画面（単一ファイルの index.html）を実装してください。"
             )
-            frontend = make_frontend(plan["implementer"])
+            frontend = with_thinking(make_frontend(plan["implementer"]), think)
             for fe_attempt in range(1, MAX_ATTEMPTS + 1):
                 fe_out: dict = {}
                 async for ev in _invoke(frontend, fe_prompt, fe_out):
@@ -611,7 +675,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                 )
                 if plan["escalate"] and fe_attempt + 1 == MAX_ATTEMPTS and MAX_ATTEMPTS > 1:
                     yield _sse("escalation", agent="frontend", to_model=PRO)
-                    frontend = make_frontend(PRO)
+                    frontend = with_thinking(make_frontend(PRO), think)
                 fe_prompt = (
                     f"{base_prompt}\n\n[設計]\n{design}\n\n{contract}\n\n"
                     f"[前回の画面実装]\n{html}\n\n"

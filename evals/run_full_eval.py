@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -28,14 +29,16 @@ def _extract(outputs: dict[str, str], author: str, key: str) -> str:
         return ""
 
 
-async def _run_once(task: str, task_type: str) -> dict[str, str]:
+async def _run_once(task: str, task_type: str, thinking: str | None = None) -> dict[str, str]:
     """orchestrator を1回実走し、各Agentの最終出力を返す。"""
     from google.adk.runners import InMemoryRunner
     from google.genai import types
 
     from agents.orchestrator.workflow import build_workflow
 
-    runner = InMemoryRunner(agent=build_workflow(task_type), app_name="hive-eval")
+    runner = InMemoryRunner(
+        agent=build_workflow(task_type, thinking=thinking), app_name="hive-eval"
+    )
     session = await runner.session_service.create_session(app_name="hive-eval", user_id="eval")
     message = types.Content(role="user", parts=[types.Part(text=task)])
     outputs: dict[str, str] = {}
@@ -51,8 +54,8 @@ async def _run_once(task: str, task_type: str) -> dict[str, str]:
 
 
 def _score_app(outputs: dict[str, str]):
-    """app タスクを出荷基準（構造＋ブラウザ実行・F-04 v2.9）で採点する。"""
-    from shared.runcheck import check_browser
+    """app タスクを出荷基準（構造＋ブラウザ実行＋受け入れ検証・F-04 v2.10）で採点する。"""
+    from shared.runcheck import check_acceptance, check_browser
     from shared.webcheck import check_app
 
     html = _extract(outputs, "implementer", "html")
@@ -60,18 +63,35 @@ def _score_app(outputs: dict[str, str]):
         return None
     persistence = _extract(outputs, "designer", "persistence").lower()
     result = check_app(html, persistence)
-    return check_browser(html) if result.passed else result
+    if result.passed:
+        result = check_browser(html)
+    script = _extract(outputs, "designer", "check_script")
+    if result.passed and script:
+        result = check_acceptance(html, script)
+    return result
 
 
 async def main() -> int:
     from shared.sandbox import verify_fastapi
 
+    # --type app のように種別を絞れる（例：節約モードの実測でappだけ走らせる）
+    only = sys.argv[sys.argv.index("--type") + 1] if "--type" in sys.argv else None
     scored = [
-        t for t in _GOLDEN["tasks"] if t.get("must_pass_tests") or t.get("must_pass_app")
+        t
+        for t in _GOLDEN["tasks"]
+        if (t.get("must_pass_tests") or t.get("must_pass_app"))
+        and (not only or t["task_type"] == only)
     ]
+    # 節約モードの再実測用（F-02・v2.10）：HIVE_AUTO_ECON=1 のときだけ
+    # E級appを本番の節約モードと同条件（Flash＋思考HIGH）で採点する。
+    # 実測記録：2026-07-09 に 1/3（オセロ✗・家計簿✓・クイズ✗）→ 既定OFFで確定
+    econ = os.environ.get("HIVE_AUTO_ECON", "0") == "1"
     passed = 0
     for task in scored:
-        outputs = await _run_once(task["task"], task["task_type"])
+        thinking = (
+            "HIGH" if econ and task.get("must_pass_app") and task.get("rank") == "E" else None
+        )
+        outputs = await _run_once(task["task"], task["task_type"], thinking)
         if task.get("must_pass_app"):
             result = _score_app(outputs)
         else:
