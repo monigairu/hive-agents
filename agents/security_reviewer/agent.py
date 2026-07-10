@@ -17,7 +17,7 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.orchestrator.schemas import SecurityReviewResult
-from shared.models import PRO
+from shared.models import PRO, gemini_with_retry
 from shared.skills import skill_toolset
 
 _INSTRUCTION = (
@@ -36,7 +36,7 @@ _INSTRUCTION = (
 # F-15：監査の品質担保のため、モデルは PRO 固定（make_xxx での差し替えは提供しない）
 security_reviewer_agent = Agent(
     name="security_reviewer",
-    model=PRO,
+    model=gemini_with_retry(PRO),
     description="生成コードのセキュリティ監査を行い、深刻度付きの指摘を報告する監査担当",
     output_schema=SecurityReviewResult,
     tools=[skill_toolset("security")],

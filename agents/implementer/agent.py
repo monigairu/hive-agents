@@ -9,7 +9,7 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.orchestrator.schemas import ImplementationResult
-from shared.models import FLASH
+from shared.models import FLASH, gemini_with_retry
 from shared.skills import skill_toolset
 
 _INSTRUCTION = (
@@ -31,7 +31,7 @@ def make_implementer(model: str = FLASH, extra_instruction: str = "") -> Agent:
     """
     return Agent(
         name="implementer",
-        model=model,
+        model=gemini_with_retry(model),
         description="設計仕様から動作するFastAPIコードを生成する実装担当",
         output_schema=ImplementationResult,
         tools=[skill_toolset("python-style", "fastapi")],

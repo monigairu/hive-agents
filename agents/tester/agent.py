@@ -10,14 +10,14 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.orchestrator.schemas import TestResult
-from shared.models import FLASH
+from shared.models import FLASH, gemini_with_retry
 from shared.skills import skill_toolset
 
 def make_tester() -> Agent:
     """tester を生成する。グラフを組むたびに新インスタンスを作る（designer と同じ理由）。"""
     return Agent(
         name="tester",
-        model=FLASH,
+        model=gemini_with_retry(FLASH),
         description="実装コードに対するpytestテストを生成するテスト担当",
         output_schema=TestResult,
         tools=[skill_toolset("pytest", "python-style")],

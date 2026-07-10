@@ -759,7 +759,13 @@ export function createGame(parent: HTMLElement): HiveGame {
     height: H,
     pixelArt: true,
     backgroundColor: "#0a0f0a",
-    scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_HORIZONTALLY },
+    scale: {
+      mode: Phaser.Scale.FIT,
+      autoCenter: Phaser.Scale.CENTER_HORIZONTALLY,
+      // 親のスタイルをPhaserにいじらせない（親の高さはページ側のCSSが正）。
+      // 高さが自動（キャンバス由来）だとFITとの押し合いで拡大ループになる
+      expandParent: false,
+    },
     scene: [scene],
   });
   return {

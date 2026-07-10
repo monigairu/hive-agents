@@ -16,7 +16,7 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.orchestrator.schemas import AppDesignSpec, WebImplementationResult
-from shared.models import FLASH
+from shared.models import FLASH, gemini_with_retry
 from shared.skills import skill_toolset
 
 _DESIGNER_INSTRUCTION = (
@@ -30,11 +30,12 @@ _DESIGNER_INSTRUCTION = (
 )
 
 _FRONTEND_INSTRUCTION = (
-    "あなたはフロントエンド実装者です。設計仕様と[APIけいやくしょ]（実装済みAPIの"
-    "エンドポイント一覧と確認方法）を受け取り、そのAPIを呼び出して動く画面"
-    "（単一ファイルの index.html）を実装してください。\n"
-    "- **契約が最優先**：fetch するのは[APIけいやくしょ]に書かれたエンドポイントだけ。"
-    "勝手に新しいパスやレスポンス形を発明しない\n"
+    "あなたはフロントエンド実装者です。前段(designer)が出力した設計仕様のJSON"
+    "（overview / endpoints / screens / style_direction）を受け取り、"
+    "そのAPIを呼び出して動く画面（単一ファイルの index.html）を実装してください。\n"
+    "- **契約が最優先**：fetch するのは設計の endpoints（差し戻し時は[APIけいやくしょ]）に"
+    "書かれたエンドポイントだけ。勝手に新しいパスやレスポンス形を発明しない。"
+    "APIの実装完成を待たず、契約だけを頼りに作る（F-03 前段出力＝契約の原則）\n"
     "- APIのベースURLは `const API = \"http://localhost:8001\";` のように定数で先頭に置き、"
     "ユーザーが書き換えられるようにする（8000はHive本体が使うため8001を既定にする）\n"
     "- 読み込み中・空データ・エラーの3状態を必ず画面に出す（fetch失敗で白画面にしない）。"
@@ -52,7 +53,7 @@ def make_app_designer(model: str = FLASH) -> Agent:
     """フルスタックdesigner を生成する。グラフを組むたびに新インスタンスを作る。"""
     return Agent(
         name="designer",
-        model=model,
+        model=gemini_with_retry(model),
         description="発注からAPIと画面の両方の設計仕様を起こすフルスタック設計担当",
         output_schema=AppDesignSpec,
         tools=[skill_toolset("api-design", "web-design")],
@@ -85,7 +86,7 @@ def make_frontend(model: str = FLASH) -> Agent:
     """frontend を任意のモデルで生成する。F-13 の交代（Flash→Pro）で差し替える。"""
     return Agent(
         name="frontend",
-        model=model,
+        model=gemini_with_retry(model),
         description="API契約に従って画面(index.html)を実装するフロントエンド担当",
         output_schema=WebImplementationResult,
         tools=[skill_toolset("web-design")],

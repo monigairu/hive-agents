@@ -174,9 +174,13 @@ export default function RpgPage() {
         </button>
       </div>
 
+      {/* キャンバスの親は「幅から決まる固定アスペクト比の箱」にする（高さ指定が肝）。
+          高さをキャンバス任せ（auto）にすると、Phaser FIT が枠線込みの親サイズに
+          合わせてキャンバスを広げる→親も広がる…の無限ループで、ページ全体が
+          0.5秒ごとに数pxずつ下がり続けるバグになる（実測で確認済み） */}
       <div
         ref={containerRef}
-        className="overflow-hidden rounded-xl border border-neutral-800 bg-black"
+        className="aspect-[38/27] max-h-[560px] w-full overflow-hidden rounded-xl border border-neutral-800 bg-black"
       />
 
       {artifact && (
