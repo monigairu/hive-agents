@@ -64,7 +64,8 @@ def build_workflow(
     - app: webapp designer → webapp implementer（既定・v2.9。ブラウザ完結の単一HTMLアプリ）
     - api: designer → implementer → tester（A2A切り替え対応）
     - lp : web designer → web implementer（M8。当面プロセス内実行のみ）
-    - fullstack: app designer → app implementer → tester（frontend は後段で orchestrator が起動）
+    - fullstack: designer → {implementer → tester ∥ frontend} → join
+      （API班と画面班の並列・v2.11。画面の検証と差し戻しは orchestrator が後段で行う）
     """
     from shared.models import FLASH, with_thinking
 
@@ -93,19 +94,24 @@ def build_workflow(
             ],
         )
     if task_type == "fullstack":
-        from agents.app.agent import make_app_designer, make_app_implementer
+        # 並列ファンアウト（F-03 Phase 2・v2.11）：設計書が出た瞬間に
+        # API班（implementer→tester）と画面班（frontend）が同時に働く。
+        # 画面はAPIの完成を待たず、設計の endpoints（契約）だけを頼りに作る
+        # ＝「前段出力＝契約」の原則がそのままグラフの形になっている。
+        # JoinNode は両班の完了を待つ合流点（Workflowは終端ノードを1つしか
+        # 許さないため必須。実測で確認済み）
+        from google.adk.workflow import JoinNode
 
+        from agents.app.agent import make_app_designer, make_app_implementer, make_frontend
+
+        designer = _t(make_app_designer(d_model))
+        join = JoinNode(name="join", description="API班と画面班の合流点")
         return Workflow(
             name="hive_orchestrator",
-            description="自然言語の発注をフルスタック設計→API実装→テストで処理する（画面は後段）",
+            description="自然言語の発注をフルスタック（API班∥画面班の並列）で処理する",
             edges=[
-                (
-                    "START",
-                    route_task,
-                    _t(make_app_designer(d_model)),
-                    _t(make_app_implementer(i_model)),
-                    make_tester(),
-                ),
+                ("START", route_task, designer, _t(make_app_implementer(i_model)), make_tester(), join),
+                (designer, _t(make_frontend(i_model)), join),
             ],
         )
     if task_type == "lp":

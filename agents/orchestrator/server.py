@@ -121,21 +121,26 @@ _PARTY = {
     "lp": ["designer", "implementer"],
     "fullstack": ["designer", "implementer", "frontend", "tester"],
 }
-# 受け渡すもの（item）と、受け手に伝える内容を抜き出すフィールド
+# 受け渡し：author → [(受け手, 渡すもの, 内容を抜き出すフィールド)]。
+# fullstack の designer は API班（implementer）と画面班（frontend）の
+# 2手に同時に渡す（v2.11 並列ファンアウト）
 _HANDOFF_ITEMS = {
     "app": {
-        "designer": ("せっけいしょ", "overview"),
+        "designer": [("implementer", "せっけいしょ", "overview")],
     },
     "api": {
-        "designer": ("せっけいしょ", "overview"),
-        "implementer": ("かんせいコード", "how_to_verify"),
+        "designer": [("implementer", "せっけいしょ", "overview")],
+        "implementer": [("tester", "かんせいコード", "how_to_verify")],
     },
     "lp": {
-        "designer": ("デザインしようしょ", "style_direction"),
+        "designer": [("implementer", "デザインしようしょ", "style_direction")],
     },
     "fullstack": {
-        "designer": ("せっけいしょ", "overview"),
-        "implementer": ("かんせいコード", "how_to_verify"),
+        "designer": [
+            ("implementer", "せっけいしょ", "overview"),
+            ("frontend", "APIけいやくしょ", "endpoints"),
+        ],
+        "implementer": [("tester", "かんせいコード", "how_to_verify")],
     },
 }
 # implementer の成果物が入るフィールド名
@@ -279,18 +284,20 @@ def _handoff_events(author: str, text: str, task_type: str) -> list[dict]:
 
     タスクが渡った瞬間に次Agentの agent_start を流すことで、
     UIは実際のLLM待ち時間を「考えている」演出として見せられる（F-14）。
+    受け手が複数のとき（fullstackのdesigner）は全員ぶんを順に流す。
     """
-    pipeline = _PIPELINES[task_type]
-    items = _HANDOFF_ITEMS[task_type]
-    if author not in items:
-        return []
-    nxt = pipeline[pipeline.index(author) + 1]
-    item, key = items[author]
-    detail = _field(text, key)[:80]
-    return [
-        _sse("handoff", from_agent=author, to_agent=nxt, item=item, detail=detail),
-        _sse("agent_start", agent=nxt, role=AGENT_ROLE.get(nxt, ""), detail=detail),
-    ]
+    events: list[dict] = []
+    for to_agent, item, key in _HANDOFF_ITEMS[task_type].get(author, []):
+        # detail はリストのフィールド（endpoints等）と文字列の両方に対応する
+        values = _list_field(text, key)
+        detail = ("; ".join(values) if values else _field(text, key))[:80]
+        events.append(
+            _sse("handoff", from_agent=author, to_agent=to_agent, item=item, detail=detail)
+        )
+        events.append(
+            _sse("agent_start", agent=to_agent, role=AGENT_ROLE.get(to_agent, ""), detail=detail)
+        )
+    return events
 
 
 def _numbered(code: str) -> str:
@@ -650,6 +657,10 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                 yield ev
 
         # --- fullstack: 画面フェーズ（バックエンド検証の通過後・F-03 前段出力＝契約）---
+        # 画面そのものはグラフ内で設計直後にAPI班と並列で生成済み（v2.11）。
+        # ここではバックエンドの合格を確認してから、画面の検証→失敗なら差し戻しを行う
+        # （API側が差し戻しで作り直されても契約＝設計の endpoints は不変なので、
+        # 並列生成した画面はそのまま使える）
         fe_result: VerificationResult | None = None
         if (
             task_type == "fullstack"
@@ -662,25 +673,22 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                 "[APIけいやくしょ]\n" + "\n".join(endpoints)
                 + "\n\n[APIの動作確認方法]\n" + _field(outputs.get("implementer"), "how_to_verify")
             )
-            yield _sse(
-                "handoff",
-                from_agent="implementer",
-                to_agent="frontend",
-                item="APIけいやくしょ",
-                detail="; ".join(endpoints)[:80],
-            )
             fe_prompt = (
                 f"{base_prompt}\n\n[設計]\n{design}\n\n{contract}\n\n"
                 "この契約どおりにAPIを呼び出す画面（単一ファイルの index.html）を実装してください。"
             )
             frontend = with_thinking(make_frontend(plan["implementer"]), think)
             for fe_attempt in range(1, MAX_ATTEMPTS + 1):
-                fe_out: dict = {}
-                async for ev in _invoke(frontend, fe_prompt, fe_out):
-                    yield ev
-                if fe_out.get("text"):
-                    outputs["frontend"] = fe_out["text"]
                 html = _field(outputs.get("frontend"), "html")
+                # 並列生成済みの画面があれば初回は検証から入る。
+                # 無いとき（グラフで生成できなかった）と差し戻し後は作り（直し）
+                if fe_attempt > 1 or not html:
+                    fe_out: dict = {}
+                    async for ev in _invoke(frontend, fe_prompt, fe_out):
+                        yield ev
+                    if fe_out.get("text"):
+                        outputs["frontend"] = fe_out["text"]
+                    html = _field(outputs.get("frontend"), "html")
                 if not html:
                     break
                 yield _sse("verify_start", attempt=fe_attempt, mode="page")
