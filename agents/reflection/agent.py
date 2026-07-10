@@ -16,7 +16,7 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.orchestrator.schemas import LessonDraft
-from shared.models import FLASH
+from shared.models import FLASH, gemini_with_retry
 
 _INSTRUCTION = (
     "あなたは開発チームのふりかえり担当です。あるタスクの検証記録"
@@ -35,7 +35,7 @@ def make_reflection(model: str = FLASH) -> Agent:
     """reflection を生成する。呼び出しごとに新インスタンスを作る（他Agentと同じ理由）。"""
     return Agent(
         name="reflection",
-        model=model,
+        model=gemini_with_retry(model),
         description="検証記録から再利用可能な教訓を蒸留するふりかえり担当",
         output_schema=LessonDraft,
         instruction=_INSTRUCTION,

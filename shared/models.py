@@ -15,6 +15,22 @@ FLASH: str = os.environ.get("HIVE_MODEL_FLASH", "gemini-3.5-flash")
 PRO: str = os.environ.get("HIVE_MODEL_PRO", "gemini-3.1-pro-preview")
 
 
+def gemini_with_retry(name: str):
+    """一時的なAPI障害に自動再試行するGeminiクライアントを作る（F-03 安定化）。
+
+    google-genai は retry_options を渡さない限り一切再試行しない。
+    HttpRetryOptions() を渡すとライブラリ標準の再試行が効く：
+    計5回・指数バックオフ（1→2→4→8秒）・対象は 408/429/5xx と接続断。
+    再試行しても駄目な障害は従来どおり例外＝server.py の見張り（watchdog）が拾う。
+    全Agentファクトリはモデル名の文字列でなくこれを使う。
+    ADK は遅延import（tests/ の隔離実行を保つため）。
+    """
+    from google.adk.models.google_llm import Gemini
+    from google.genai import types
+
+    return Gemini(model=name, retry_options=types.HttpRetryOptions())
+
+
 def with_thinking(agent, level: str | None):
     """Agentに思考レベル（Gemini 3 の thinking_level）を設定して返す（F-02）。
 

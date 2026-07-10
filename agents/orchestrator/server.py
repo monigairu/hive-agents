@@ -52,6 +52,7 @@ from shared.security_patterns import (
     scan_code,
 )
 from shared.telemetry import agent_span, setup_tracing
+from shared.watchdog import guard_silence
 
 
 def _field(json_text: str | None, key: str) -> str:
@@ -148,6 +149,9 @@ _IMPL_FACTORY = {
 }
 
 MAX_ATTEMPTS = int(os.environ.get("HIVE_MAX_ATTEMPTS", "3"))
+# F-03 安定化：LLM/A2A呼び出しの沈黙タイムアウト（秒）。イベントがこの秒数
+# 途絶えたら、固まったまま待ち続けずに明示的に失敗させてUIに知らせる。"0"で無効
+_AGENT_TIMEOUT = float(os.environ.get("HIVE_AGENT_TIMEOUT", "300"))
 # デモ/テスト用：最初の N 回の検証を強制的に失敗扱いにし、修正ループを観察できる。
 _DEMO_FAIL = int(os.environ.get("HIVE_DEMO_FAIL_ATTEMPTS", "0"))
 # F-15 セキュリティ監査： "1"=両層（既定）/ "pattern"=第1層のみ（$0）/ "0"=無効
@@ -175,9 +179,8 @@ async def _run_silent(agent, prompt: str) -> str | None:
     session = await runner.session_service.create_session(app_name=APP_NAME, user_id="ui")
     message = types.Content(role="user", parts=[types.Part(text=prompt)])
     text: str | None = None
-    async for event in runner.run_async(
-        user_id="ui", session_id=session.id, new_message=message
-    ):
+    events = runner.run_async(user_id="ui", session_id=session.id, new_message=message)
+    async for event in guard_silence(events, _AGENT_TIMEOUT):
         if event.content and event.content.parts:
             t = "".join(p.text for p in event.content.parts if p.text)
             if t:
@@ -192,9 +195,8 @@ async def _invoke(agent, prompt: str, out: dict) -> AsyncIterator[dict]:
     message = types.Content(role="user", parts=[types.Part(text=prompt)])
     role = AGENT_ROLE.get(agent.name, "")
     yield _sse("agent_start", agent=agent.name, role=role)
-    async for event in runner.run_async(
-        user_id="ui", session_id=session.id, new_message=message
-    ):
+    events = runner.run_async(user_id="ui", session_id=session.id, new_message=message)
+    async for event in guard_silence(events, _AGENT_TIMEOUT):
         if event.content and event.content.parts:
             text = "".join(p.text for p in event.content.parts if p.text)
             if text:
@@ -215,6 +217,61 @@ async def _verify(code: str, test_code: str, attempt: int) -> VerificationResult
         if span:
             span.set_attribute("verify.passed", result.passed)
     return result
+
+
+async def _verify_artifact(
+    task_type: str, outputs: dict[str, str], attempt: int
+) -> VerificationResult:
+    """成果物1回ぶんの機械検証を実行し、結果だけ返す（F-04）。
+
+    - app: 出荷基準の多段オラクル（構造チェック→ブラウザ実行→受け入れ検証→
+      スマホ表示のvision判定※レポートのみ・合否は変えない）
+    - lp : ページの決定論チェック
+    - api / fullstack: uv隔離サンドボックスで pytest
+
+    SSEイベントを出さない純粋な検証部品にしてある：セキュリティ監査（F-15・LLM）と
+    並列に走らせるため（監査のLLM待ち時間の裏で$0の機械検証を済ませる・v2.11）。
+    """
+    code = _field(outputs.get("implementer"), _RESULT_KEY[task_type])
+    if task_type == "lp":
+        return check_web(code)
+    if task_type == "app":
+        # 出荷基準の2段オラクル（F-04・v2.9）：構造チェック→ブラウザ実行検証
+        persistence = _field(outputs.get("designer"), "persistence").lower()
+        result = check_app(code, persistence)
+        if result.passed:
+            with agent_span(
+                "hive.runcheck", operation="execute_tool", agent="browser"
+            ) as span:
+                browser_result = await asyncio.to_thread(check_browser, code)
+                if span:
+                    span.set_attribute("verify.passed", browser_result.passed)
+            result = VerificationResult(
+                passed=browser_result.passed,
+                returncode=browser_result.returncode,
+                output=f"{result.output}\n{browser_result.output}",
+            )
+        # 第3段オラクル（F-04・v2.10）：designerが書いた受け入れ検証スクリプトを
+        # ブラウザで実行し「要求どおり操作できるか」を機械採点する
+        check_script = _field(outputs.get("designer"), "check_script")
+        if result.passed and check_script:
+            acc = await asyncio.to_thread(check_acceptance, code, check_script)
+            result = VerificationResult(
+                passed=acc.passed,
+                returncode=acc.returncode,
+                output=f"{result.output}\n{acc.output}",
+            )
+        # スマホ表示のvision判定（F-04・v2.10）：レポートのみ＝合否は変えない
+        if result.passed and _LAYOUT_ON:
+            layout_note = await asyncio.to_thread(check_layout, code)
+            if layout_note:
+                result = VerificationResult(
+                    passed=True,
+                    returncode=0,
+                    output=f"{result.output}\n{layout_note}",
+                )
+        return result
+    return await _verify(code, _field(outputs.get("tester"), "test_code"), attempt)
 
 
 def _handoff_events(author: str, text: str, task_type: str) -> list[dict]:
@@ -423,6 +480,7 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
     outputs: dict[str, str] = {}
     failure_notes: list[str] = []  # 差し戻し理由の記録（F-08 蒸留の材料・機械産の情報のみ）
     result: VerificationResult | None = None
+    verify_task: asyncio.Task | None = None  # 監査と並列に走らせる機械検証（v2.11）
     try:
         # 試行1：WorkflowAgent グラフ（タスク種別＋品質レベルに応じたパイプライン・F-02）
         runner = InMemoryRunner(
@@ -436,9 +494,10 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
             "agent_start", agent="designer", role=AGENT_ROLE["designer"], detail=task[:60]
         )
         with agent_span("hive.workflow", operation="invoke_agent", **decision):
-            async for event in runner.run_async(
+            events = runner.run_async(
                 user_id="ui", session_id=session.id, new_message=message
-            ):
+            )
+            async for event in guard_silence(events, _AGENT_TIMEOUT):
                 author = getattr(event, "author", None)
                 text = ""
                 if event.content and event.content.parts:
@@ -503,7 +562,13 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
             if not code or (has_tester and not test_code):
                 break
 
-            # --- F-15 セキュリティ監査（implementer の出力直後・サンドボックスの前）---
+            # 機械検証（F-04・$0）を先に裏で走らせておく（v2.11 並列化）。
+            # 監査（F-15・LLMで数十秒）と機械検証は同じ成果物を読むだけで
+            # 互いの結果を使わないため、同時に走らせて1試行あたりの待ちを縮める。
+            # SSEイベントの順序は従来どおり（監査→検証）＝UI側の変更は不要
+            verify_task = asyncio.create_task(_verify_artifact(task_type, outputs, attempt))
+
+            # --- F-15 セキュリティ監査（implementer の出力直後・機械検証と並列）---
             # 「みんなでがんばれ」は環境変数に関係なく監査を強制ON（force_security）
             sec_report = None
             if security_on:
@@ -544,6 +609,8 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                     findings=[f.model_dump() for f in sec_report.findings[:20]],
                 )
                 if not sec_report.passed:
+                    # 監査NGの修正が先。裏の検証は結果を使わず止める（$0なので損はない）
+                    verify_task.cancel()
                     failure_notes.append(f"セキュリティ監査NG: {sec_report.headline()}")
                     if attempt == MAX_ATTEMPTS:
                         break
@@ -555,48 +622,10 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                         yield ev
                     continue  # 修正後は再監査からやり直す
 
-            # --- F-04 検証（app: 構造+ブラウザ実行 / lp: ページ機械チェック / api系: pytest）---
+            # --- F-04 検証（中身は _verify_artifact。監査と並列に走り終えている）---
             verify_mode = {"lp": "page", "app": "browser"}.get(task_type, "pytest")
             yield _sse("verify_start", attempt=attempt, mode=verify_mode)
-            if task_type == "lp":
-                result = check_web(code)
-            elif task_type == "app":
-                # 出荷基準の2段オラクル（F-04・v2.9）：構造チェック→ブラウザ実行検証
-                persistence = _field(outputs.get("designer"), "persistence").lower()
-                result = check_app(code, persistence)
-                if result.passed:
-                    with agent_span(
-                        "hive.runcheck", operation="execute_tool", agent="browser"
-                    ) as span:
-                        browser_result = await asyncio.to_thread(check_browser, code)
-                        if span:
-                            span.set_attribute("verify.passed", browser_result.passed)
-                    result = VerificationResult(
-                        passed=browser_result.passed,
-                        returncode=browser_result.returncode,
-                        output=f"{result.output}\n{browser_result.output}",
-                    )
-                # 第3段オラクル（F-04・v2.10）：designerが書いた受け入れ検証スクリプトを
-                # ブラウザで実行し「要求どおり操作できるか」を機械採点する
-                check_script = _field(outputs.get("designer"), "check_script")
-                if result.passed and check_script:
-                    acc = await asyncio.to_thread(check_acceptance, code, check_script)
-                    result = VerificationResult(
-                        passed=acc.passed,
-                        returncode=acc.returncode,
-                        output=f"{result.output}\n{acc.output}",
-                    )
-                # スマホ表示のvision判定（F-04・v2.10）：レポートのみ＝合否は変えない
-                if result.passed and _LAYOUT_ON:
-                    layout_note = await asyncio.to_thread(check_layout, code)
-                    if layout_note:
-                        result = VerificationResult(
-                            passed=True,
-                            returncode=0,
-                            output=f"{result.output}\n{layout_note}",
-                        )
-            else:
-                result = await _verify(code, test_code, attempt)
+            result = await verify_task
             yield _sse(
                 "verify_result",
                 passed=result.passed,
@@ -706,8 +735,21 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                         forgotten=_bank.forget(),
                     )
         yield _sse("done")
+    except TimeoutError:
+        # 見張り（guard_silence）の発報：固まったまま待たせず、明示的に知らせる（F-03）
+        yield _sse(
+            "error",
+            message=(
+                f"エージェントの応答が{int(_AGENT_TIMEOUT)}秒間途絶えたため中断しました"
+                "（HIVE_AGENT_TIMEOUT で調整できます）"
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 - UIにエラーを流して終了
         yield _sse("error", message=str(exc))
+    finally:
+        # 裏で走らせた機械検証が残っていれば片付ける（中断時の後始末）
+        if verify_task is not None and not verify_task.done():
+            verify_task.cancel()
 
 
 def _remember_security(task_type: str, report: SecurityReport) -> dict:

@@ -16,7 +16,7 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.orchestrator.schemas import AppDesignSpec, WebImplementationResult
-from shared.models import FLASH
+from shared.models import FLASH, gemini_with_retry
 from shared.skills import skill_toolset
 
 _DESIGNER_INSTRUCTION = (
@@ -52,7 +52,7 @@ def make_app_designer(model: str = FLASH) -> Agent:
     """フルスタックdesigner を生成する。グラフを組むたびに新インスタンスを作る。"""
     return Agent(
         name="designer",
-        model=model,
+        model=gemini_with_retry(model),
         description="発注からAPIと画面の両方の設計仕様を起こすフルスタック設計担当",
         output_schema=AppDesignSpec,
         tools=[skill_toolset("api-design", "web-design")],
@@ -85,7 +85,7 @@ def make_frontend(model: str = FLASH) -> Agent:
     """frontend を任意のモデルで生成する。F-13 の交代（Flash→Pro）で差し替える。"""
     return Agent(
         name="frontend",
-        model=model,
+        model=gemini_with_retry(model),
         description="API契約に従って画面(index.html)を実装するフロントエンド担当",
         output_schema=WebImplementationResult,
         tools=[skill_toolset("web-design")],

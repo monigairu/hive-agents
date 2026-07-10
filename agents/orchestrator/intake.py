@@ -31,11 +31,11 @@ def make_intake(model: str | None = None):
     """
     from google.adk import Agent
 
-    from shared.models import FLASH, with_thinking
+    from shared.models import FLASH, gemini_with_retry, with_thinking
 
     agent = Agent(
         name="intake",
-        model=model or FLASH,
+        model=gemini_with_retry(model or FLASH),
         description="発注文をクエスト依頼書（OrderSpec）に正規化する受付担当",
         output_schema=OrderSpec,
         instruction=_INSTRUCTION,

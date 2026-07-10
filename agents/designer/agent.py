@@ -9,7 +9,7 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.orchestrator.schemas import DesignSpec
-from shared.models import FLASH
+from shared.models import FLASH, gemini_with_retry
 from shared.skills import skill_toolset
 
 def make_designer(model: str = FLASH) -> Agent:
@@ -20,7 +20,7 @@ def make_designer(model: str = FLASH) -> Agent:
     """
     return Agent(
         name="designer",
-        model=model,
+        model=gemini_with_retry(model),
         description="発注内容からAPIの設計仕様（エンドポイント・ファイル構成）を起こす設計担当",
         output_schema=DesignSpec,
         tools=[skill_toolset("api-design")],

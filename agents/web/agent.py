@@ -12,7 +12,7 @@ from __future__ import annotations
 from google.adk import Agent
 
 from agents.orchestrator.schemas import WebDesignSpec, WebImplementationResult
-from shared.models import FLASH
+from shared.models import FLASH, gemini_with_retry
 from shared.skills import skill_toolset
 
 _DESIGNER_INSTRUCTION = (
@@ -41,7 +41,7 @@ def make_web_designer(model: str = FLASH) -> Agent:
     """web版designer を生成する。グラフを組むたびに新インスタンスを作る。"""
     return Agent(
         name="designer",
-        model=model,
+        model=gemini_with_retry(model),
         description="発注からWebページのデザイン仕様（性格・構成・スタイル方針）を起こす設計担当",
         output_schema=WebDesignSpec,
         tools=[skill_toolset("web-design")],
@@ -56,7 +56,7 @@ def make_web_implementer(model: str = FLASH) -> Agent:
     """web版implementer を任意のモデルで生成する。F-13 の交代（Flash→Pro）で差し替える。"""
     return Agent(
         name="implementer",
-        model=model,
+        model=gemini_with_retry(model),
         description="デザイン仕様から単一ファイルの高品質なHTMLページを実装する担当",
         output_schema=WebImplementationResult,
         tools=[skill_toolset("web-design")],
