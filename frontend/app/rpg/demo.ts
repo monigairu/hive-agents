@@ -37,19 +37,39 @@ const SCRIPT: Step[] = [
   },
   { at: 7400, type: "agent_start", data: { agent: "designer", detail: "喫茶店LP＋予約APIの設計" } },
   { at: 13500, type: "agent_output", data: { agent: "designer", text: "{}" } },
+  // detail はサーバ実装どおり長文が来る（endpoints の join 等）＝clip の実演も兼ねる
   {
     at: 13700,
     type: "handoff",
-    data: { from_agent: "designer", to_agent: "implementer", item: "せっけいしょ", detail: "予約APIの実装" },
+    data: {
+      from_agent: "designer",
+      to_agent: "implementer",
+      item: "せっけいしょ",
+      detail: "POST /reservations; GET /reservations; DELETE /reservations/{id}",
+    },
   },
-  { at: 13800, type: "agent_start", data: { agent: "implementer", detail: "予約APIの実装" } },
+  {
+    at: 13800,
+    type: "agent_start",
+    data: {
+      agent: "implementer",
+      detail: "POST /reservations; GET /reservations; DELETE /reservations/{id}",
+    },
+  },
   {
     at: 17400,
     type: "handoff",
     data: { from_agent: "designer", to_agent: "frontend", item: "せっけいしょ", detail: "LPページの実装" },
   },
   // ここから実装担当と画面担当が並列で働く（F-03の可視化）
-  { at: 17500, type: "agent_start", data: { agent: "frontend", detail: "LPページの実装" } },
+  {
+    at: 17500,
+    type: "agent_start",
+    data: {
+      agent: "frontend",
+      detail: "トップの印象を和モダンに振り切り、予約導線を1画面で完結させるLPの実装",
+    },
+  },
   { at: 26000, type: "agent_output", data: { agent: "implementer", text: "{}" } },
   {
     at: 26300,

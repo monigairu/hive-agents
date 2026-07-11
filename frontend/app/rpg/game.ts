@@ -72,6 +72,27 @@ const EMOTE_Y = 62; // 頭上エモートの高さ
 const DEPTH_UI = 1500; // ステータス窓
 const DEPTH_MSG = 2000; // メッセージウィンドウ
 
+/**
+ * 表示用の切り詰め。サーバが流す説明文（設計の機能一覧など）は長文のことが
+ * あるため、ぶつ切り（「…オフラ」等の不自然な日本語）を避けて
+ * 句読点・区切り記号の位置で切り、切ったことがわかるよう「…」を付ける。
+ */
+function clip(text: string, max: number): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  const head = t.slice(0, max);
+  const last = (chars: string[]) => Math.max(...chars.map((ch) => head.lastIndexOf(ch)));
+  // 文の区切り（。、；等）を優先し、無ければ語の区切り（空白・スラッシュ）で切る。
+  // 区切りが前方すぎるときは文字数優先（短くなりすぎを防ぐ）
+  const strong = last(["。", "、", "；", ";", "・"]);
+  const weak = last([" ", "／", "/", "「"]);
+  let boundary = -1;
+  if (strong >= Math.floor(max * 0.4)) boundary = strong;
+  else if (weak >= Math.floor(max * 0.55)) boundary = weak;
+  const cut = boundary > 0 ? head.slice(0, boundary) : head;
+  return `${cut}…`;
+}
+
 const STATUS_COLOR = {
   wait: "#9ca3af",
   work: "#fbbf24",
@@ -340,7 +361,13 @@ class HiveRpgScene extends Phaser.Scene {
   }
 
   private async walkTo(a: Actor, dest: Tile) {
-    const path = findPath(this.grid, a.tile, dest);
+    // 仲間が立っているタイルは避けて歩く（重なり防止）。避けると届かない場合だけ素通りを許す
+    const occupied = this.grid.map((row) => [...row]);
+    this.actors.forEach((other) => {
+      if (other !== a) occupied[other.tile.r][other.tile.c] = false;
+    });
+    let path = findPath(occupied, a.tile, dest);
+    if (path.length === 0) path = findPath(this.grid, a.tile, dest);
     for (const step of path) {
       const dc = step.c - a.tile.c;
       if (dc !== 0) {
@@ -662,7 +689,7 @@ class HiveRpgScene extends Phaser.Scene {
     const agent = String(d.agent ?? "");
     switch (e.type) {
       case "task_received": {
-        this.addMessage(`クエスト：${String(d.task ?? "").slice(0, 40)}`);
+        this.addMessage(`クエスト：${clip(String(d.task ?? ""), 40)}`);
         this.sparkle((BOARD.c + 1) * TS, BOARD.r * TS + TS / 2, 0xfbbf24, 6);
         return;
       }
@@ -690,7 +717,7 @@ class HiveRpgScene extends Phaser.Scene {
         return this.addMessage("うけつけが 依頼書を かいている…");
       case "order_spec": {
         const what = String(d.what ?? "");
-        if (what) this.addMessage(`依頼書：${what.slice(0, 40)}`);
+        if (what) this.addMessage(`依頼書：${clip(what, 40)}`);
         return;
       }
       case "router": {
@@ -710,7 +737,7 @@ class HiveRpgScene extends Phaser.Scene {
         const lessons = (d.lessons as string[]) ?? [];
         this.glowShelf(0xfbbf24);
         return this.addMessage(
-          `むかしの きおくを おもいだした：${(lessons[0] ?? "").slice(0, 30)}`,
+          `むかしの きおくを おもいだした：${clip(lessons[0] ?? "", 30)}`,
         );
       }
       case "agent_start": {
@@ -726,7 +753,7 @@ class HiveRpgScene extends Phaser.Scene {
           this.setStatus(agent, "しごとちゅう", STATUS_COLOR.work);
           this.addMessage(
             detail
-              ? `${LABEL[agent] ?? agent}は 「${detail.slice(0, 28)}」に とりくんでいる…`
+              ? `${LABEL[agent] ?? agent}は 「${clip(detail, 28)}」に とりくんでいる…`
               : `${LABEL[agent] ?? agent}は かんがえている…`,
           );
           this.startWork(a);
@@ -876,7 +903,7 @@ class HiveRpgScene extends Phaser.Scene {
       case "retry": {
         this.addMessage(`もういちど ちょうせん！（${String(d.attempt)}/${String(d.max)}）`);
         const reason = String(d.reason ?? "");
-        if (reason) this.addMessage(`りゆう：${reason.slice(0, 34)}`);
+        if (reason) this.addMessage(`りゆう：${clip(reason, 34)}`);
         return;
       }
       case "escalation": {
@@ -904,7 +931,7 @@ class HiveRpgScene extends Phaser.Scene {
       case "memory_write": {
         this.glowShelf(0x60a5fa);
         return this.addMessage(
-          `ぼうけんのしょに きろくした：${String(d.title ?? "").slice(0, 30)}`,
+          `ぼうけんのしょに きろくした：${clip(String(d.title ?? ""), 30)}`,
         );
       }
       case "done": {
@@ -942,7 +969,7 @@ class HiveRpgScene extends Phaser.Scene {
       }
       case "error": {
         this.cameras.main.shake(250, 0.003);
-        this.addMessage(`エラーが おきた：${String(d.message ?? "").slice(0, 40)}`);
+        this.addMessage(`エラーが おきた：${clip(String(d.message ?? ""), 40)}`);
         this.actors.forEach((a, key) => {
           this.pushAction(key, async () => {
             this.stopWork(a);
@@ -979,7 +1006,7 @@ class HiveRpgScene extends Phaser.Scene {
     };
     switch (e.type) {
       case "task_received":
-        return this.pushInstantMessage(`クエスト：${String(d.task ?? "").slice(0, 40)}`);
+        return this.pushInstantMessage(`クエスト：${clip(String(d.task ?? ""), 40)}`);
       case "router": {
         const party = (d.party as { agent: string; role: string }[]) ?? [];
         if (party.length > 0) this.spawnParty(party, true);
@@ -994,7 +1021,7 @@ class HiveRpgScene extends Phaser.Scene {
       case "memory_recall": {
         const lessons = (d.lessons as string[]) ?? [];
         return this.pushInstantMessage(
-          `むかしの きおくを おもいだした：${(lessons[0] ?? "").slice(0, 30)}`,
+          `むかしの きおくを おもいだした：${clip(lessons[0] ?? "", 30)}`,
         );
       }
       case "agent_start": {
@@ -1078,12 +1105,12 @@ class HiveRpgScene extends Phaser.Scene {
       }
       case "memory_write":
         return this.pushInstantMessage(
-          `ぼうけんのしょに きろくした：${String(d.title ?? "").slice(0, 30)}`,
+          `ぼうけんのしょに きろくした：${clip(String(d.title ?? ""), 30)}`,
         );
       case "done":
         return this.pushInstantMessage("クエスト かんりょう！ せいかぶつを のうひんした");
       case "error":
-        return this.pushInstantMessage(`エラーが おきた：${String(d.message ?? "").slice(0, 40)}`);
+        return this.pushInstantMessage(`エラーが おきた：${clip(String(d.message ?? ""), 40)}`);
       default:
         return;
     }
