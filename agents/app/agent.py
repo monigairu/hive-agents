@@ -72,6 +72,12 @@ APP_IMPLEMENTER_NOTE = (
     "HTMLを生成・埋め込み・配信するコードは書かないこと（画面は別の担当が index.html として作る）。"
     "あなたは endpoints のJSON APIだけを実装する。"
     "画面からfetchで呼ばれるため、CORSミドルウェア（全オリジン許可）を必ず有効にすること。"
+    "\n【重要・起動】受け取るのはコマンドを使わない人です。ファイル末尾に必ず次を書き、"
+    "`python main.py` だけで起動できるようにすること（機械チェックで差し戻されます）：\n"
+    'if __name__ == "__main__":\n'
+    "    import uvicorn\n"
+    '    uvicorn.run(app, host="127.0.0.1", port=8001)\n'
+    "how_to_verify には uvicorn コマンドではなく「main.py を python main.py で実行」と書く。"
 )
 
 

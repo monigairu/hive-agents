@@ -43,7 +43,12 @@ from shared.memory import ReasoningBank, acceptable_lesson, render_memories
 from shared.models import FLASH, PRO, with_thinking
 from shared.layoutcheck import check_layout
 from shared.runcheck import check_acceptance, check_browser
-from shared.sandbox import VerificationResult, verify_fastapi
+from shared.sandbox import (
+    STARTUP_HEADING as _STARTUP_HEADING,
+    VerificationResult,
+    check_selfstart,
+    verify_fastapi,
+)
 from shared.webcheck import check_app, check_frontend, check_web
 from shared.security_patterns import (
     SecurityFinding,
@@ -276,7 +281,17 @@ async def _verify_artifact(
                     output=f"{result.output}\n{layout_note}",
                 )
         return result
-    return await _verify(code, _field(outputs.get("tester"), "test_code"), attempt)
+    result = await _verify(code, _field(outputs.get("tester"), "test_code"), attempt)
+    # fullstack だけは「非エンジニアがダブルクリックで起動できる形か」も検査する
+    # （同梱の start.bat / start.command が python main.py を呼ぶ前提・v2.11）
+    if task_type == "fullstack" and result.passed:
+        start = check_selfstart(code)
+        return VerificationResult(
+            passed=start.passed,
+            returncode=start.returncode,
+            output=f"{result.output}\n{start.output}",
+        )
+    return result
 
 
 def _handoff_events(author: str, text: str, task_type: str) -> list[dict]:
@@ -646,6 +661,10 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                 failure_label, reason = "ページ検証の指摘", _page_reason(result.output)
             elif task_type == "app":
                 failure_label, reason = "アプリ検証の指摘", _page_reason(result.output)
+            elif _STARTUP_HEADING in result.output:
+                # pytestは通り、起動チェック（fullstack）だけが落ちた場合。
+                # pytestの失敗行を探しても見つからないので、指摘そのものを理由にする
+                failure_label, reason = "起動チェックの指摘", _page_reason(result.output)
             else:
                 failure_label, reason = "検証の失敗ログ(pytest)", result.headline()
             failure_notes.append(f"検証NG({verify_mode}): {reason}")

@@ -46,6 +46,43 @@ class VerificationResult(BaseModel):
         return f"テスト失敗 (returncode={self.returncode})"
 
 
+# 生成APIの既定ポート（8000はHive本体が使うため8001を使う。frontendの契約とも一致）
+API_PORT = 8001
+# 起動チェックの失敗を出力から見分ける目印（orchestrator が差し戻し理由の表示に使う）
+STARTUP_HEADING = "起動チェックで以下の問題を検出:"
+
+
+def check_selfstart(code: str) -> VerificationResult:
+    """`python main.py` だけでAPIが起動するかを機械チェックする（F-04・v2.11）。
+
+    fullstack の成果物は非エンジニアが受け取る。`uvicorn main:app --port 8001` は
+    彼らの語彙に存在しないため、同梱の起動スクリプト（start.bat / start.command）が
+    `python main.py` を呼ぶだけで動く形を出荷基準とする。その前提を決定論で検査する。
+
+    ※ `if __name__ == "__main__":` ブロックは import 時に実行されないので、
+    サンドボックスの pytest（TestClient経由）には影響しない。
+    """
+    problems = []
+    if '__name__ == "__main__"' not in code and "__name__ == '__main__'" not in code:
+        problems.append(
+            'if __name__ == "__main__": ブロックが無い。'
+            "`python main.py` で起動できないと、受け取った人が動かせない"
+        )
+    if "uvicorn.run(" not in code:
+        problems.append("uvicorn.run(...) の直接起動が無い（__main__ ブロック内で呼ぶこと）")
+    if str(API_PORT) not in code:
+        problems.append(f"起動ポートが {API_PORT} でない（画面側の契約が {API_PORT} 固定）")
+    if problems:
+        return VerificationResult(
+            passed=False,
+            returncode=1,
+            output=f"{STARTUP_HEADING}\n" + "\n".join(f"- {p}" for p in problems),
+        )
+    return VerificationResult(
+        passed=True, returncode=0, output=f"起動チェックOK（python main.py で :{API_PORT} 起動）"
+    )
+
+
 def verify_fastapi(code: str, test_code: str, timeout: int = 180) -> VerificationResult:
     """生成コード(main.py)とテスト(test_main.py)を隔離環境で実行して判定する。"""
     with tempfile.TemporaryDirectory(prefix="hive-verify-") as d:

@@ -26,5 +26,7 @@ references/crud-example.md を必要なら参照（load_skill_resource）。
 - 既存を取得→無ければ404→`update.dict(exclude_unset=True)` で部分更新をマージ。
 
 ## 注意
-- `if __name__ == "__main__":` での uvicorn 起動は任意（how_to_verify では `uvicorn main:app` を案内）。
+- `if __name__ == "__main__":` で `uvicorn.run(app, host="127.0.0.1", port=8001)` を書き、
+  `python main.py` だけで起動できるようにする（成果物を受け取るのはコマンドを使わない人。
+  fullstackでは機械チェックで差し戻される）。import 時には実行されないためテストに影響しない。
 - 設計の endpoints を全て実装する。

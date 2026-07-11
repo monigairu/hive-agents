@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { HistorySidebar } from "../components/HistorySidebar";
 import { SakusenSelect } from "../components/SakusenSelect";
+import { START_BAT, START_COMMAND } from "../lib/launcher";
 import * as quest from "../lib/quest";
 import type { HiveGame } from "./game";
 
@@ -46,6 +47,70 @@ function buildArtifact(outputs: Record<string, string>): Artifact | null {
     html: String((impl.html || fe.html) ?? ""),
     designNotes: String((impl.design_notes || fe.design_notes) ?? ""),
   };
+}
+
+/**
+ * fullstack成果物（API＋画面）の受け取り方の案内。
+ *
+ * この成果物だけはブラウザで開くだけでは動かない（APIサーバーの起動が要る）。
+ * その事実を隠さず先に伝え、①コマンド不要の起動キット ②そもそも起動が
+ * 要らない発注のしかた、の両方を渡す。
+ */
+function LauncherPanel({ code }: { code: string }) {
+  return (
+    <div className="rounded-lg border border-amber-300 bg-white/70 p-3 dark:bg-neutral-900/40">
+      <p className="text-xs font-semibold text-amber-900 dark:text-amber-200">
+        ⚠️ この成果物は「APIサーバーの起動」が必要です（開発者向け）
+      </p>
+      <p className="mt-1 text-[11px] leading-relaxed text-neutral-600 dark:text-neutral-400">
+        上のプレビューがエラー表示なのはAPIが起動していないためで、故障ではありません。
+        <br />
+        <strong>ブラウザで開くだけで動くもの</strong>が欲しいときは、「API」と書かずに
+        「
+        <span className="rounded bg-amber-100 px-1 dark:bg-amber-900/40">
+          TODOアプリを作って
+        </span>
+        」のように発注してください（保存もできる単一ファイルのアプリになります）。
+      </p>
+
+      <p className="mt-3 text-xs font-semibold text-neutral-700 dark:text-neutral-300">
+        それでも動かすなら：3ステップ（Pythonが入ったPCが必要です）
+      </p>
+      <ol className="mt-1 list-decimal space-y-0.5 pl-5 text-[11px] text-neutral-600 dark:text-neutral-400">
+        <li>下のボタンで3つのファイルを「同じフォルダ」に保存する</li>
+        <li>
+          <code>start.bat</code>（Mac は <code>start.command</code>）をダブルクリックする
+          ／ 黒い画面は開いたままにする
+        </li>
+        <li>
+          <code>index.html</code> を開く（もう一度「べつタブでひらく」でもOK）
+        </li>
+      </ol>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button
+          onClick={() => downloadFile("main.py", code)}
+          className="rounded-lg border border-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100"
+        >
+          💾 main.py（API本体）
+        </button>
+        <button
+          onClick={() => downloadFile("start.bat", START_BAT)}
+          className="rounded-lg border border-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100"
+        >
+          ▶ start.bat（Windows）
+        </button>
+        <button
+          onClick={() => downloadFile("start.command", START_COMMAND)}
+          className="rounded-lg border border-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100"
+        >
+          ▶ start.command（Mac）
+        </button>
+      </div>
+      <p className="mt-2 text-[10px] text-neutral-500">
+        ※ Macは初回のみ、start.command を右クリック →「開く」で実行を許可してください
+      </p>
+    </div>
+  );
 }
 
 /** 生成ページを新しいタブで開く。 */
@@ -204,11 +269,6 @@ export default function RpgPage() {
                 title="できあがった画面のプレビュー"
                 className="h-[420px] w-full rounded-lg border border-neutral-300 bg-white"
               />
-              {artifact.kind === "app" && (
-                <p className="text-[11px] text-neutral-500">
-                  ※プレビューはAPI未起動のため空（またはエラー表示）の状態です。下の「確認する方法」の手順でAPIを起動すると実際に動きます
-                </p>
-              )}
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={() => openHtml(artifact.html)}
@@ -222,15 +282,10 @@ export default function RpgPage() {
                 >
                   💾 index.html を ダウンロード
                 </button>
-                {artifact.kind === "app" && artifact.code && (
-                  <button
-                    onClick={() => downloadFile("main.py", artifact.code)}
-                    className="rounded-lg border border-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100"
-                  >
-                    💾 main.py（API）を ダウンロード
-                  </button>
-                )}
               </div>
+              {artifact.kind === "app" && artifact.code && (
+                <LauncherPanel code={artifact.code} />
+              )}
               <details>
                 <summary className="cursor-pointer text-xs font-semibold text-amber-700">
                   📜 生成されたHTMLを見る
