@@ -3,7 +3,7 @@
 SHELL := /bin/bash
 ENV := set -a && source .env && set +a
 
-.PHONY: help test eval eval-full smoke run-local serve-agents stop-agents status run-a2a serve-orchestrator ui
+.PHONY: help test eval eval-full smoke run-local serve-agents stop-agents status run-a2a serve-orchestrator ui armor-setup identity-setup
 
 help: ## このヘルプを表示
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -40,3 +40,9 @@ serve-orchestrator: ## M3: OrchestratorのSSEサーバを起動（:8000・フロ
 
 ui: ## M3: チャットUI(Next.js)を起動（:3000・別ターミナルで serve-orchestrator も必要）
 	cd frontend && npm run dev
+
+armor-setup: ## F-11: Model Armor のAPI有効化＋テンプレート作成（1回だけ）
+	./scripts/setup_model_armor.sh
+
+identity-setup: ## F-10: Agent別サービスアカウント作成＋最小権限付与（1回だけ）
+	./scripts/setup_agent_identity.sh

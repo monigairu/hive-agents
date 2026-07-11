@@ -70,6 +70,7 @@ type TimelineItem =
   | { id: number; kind: "retry"; attempt: number; max: number; reason: string }
   | { id: number; kind: "escalation"; agent: string; toModel: string }
   | { id: number; kind: "remember"; success: boolean; title: string; forgotten: number }
+  | { id: number; kind: "armor"; stage: string; allowed: boolean; matched: string[] }
   | { id: number; kind: "done" }
   | { id: number; kind: "error"; message: string };
 
@@ -192,6 +193,17 @@ function applyEvent(prev: TimelineItem[], type: string, d: any): TimelineItem[] 
       return [
         ...prev,
         { id: nextId(), kind: "escalation", agent: d.agent, toModel: d.to_model },
+      ];
+    case "armor":
+      return [
+        ...prev,
+        {
+          id: nextId(),
+          kind: "armor",
+          stage: d.stage ?? "prompt",
+          allowed: String(d.allowed) === "true",
+          matched: (d.matched as string[]) ?? [],
+        },
       ];
     case "done":
       return [...prev, { id: nextId(), kind: "done" }];
@@ -620,6 +632,24 @@ function renderItem(it: TimelineItem) {
           {it.forgotten > 0 && (
             <span className="ml-1 text-xs text-indigo-500">／古い記憶を{it.forgotten}件忘却</span>
           )}
+        </div>
+      );
+    case "armor":
+      return (
+        <div
+          className={`rounded-xl px-4 py-3 text-sm ${
+            it.allowed
+              ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
+              : "bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-200"
+          }`}
+        >
+          <div className="font-semibold">
+            {it.allowed
+              ? it.stage === "prompt"
+                ? "🛡️✅ 入口検査（Model Armor）：依頼文は安全"
+                : "🛡️✅ 出口検査（Model Armor）：納品物に機密データの混入なし"
+              : `🛡️⛔ 実行時安全フィルタ（Model Armor）が検出：${it.matched.join("・")}`}
+          </div>
         </div>
       );
     case "done":

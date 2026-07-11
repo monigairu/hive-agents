@@ -1,9 +1,14 @@
-# Hive — 要件定義書 v2.11
+# Hive — 要件定義書 v2.12
 
 ## 0. このファイルについて
 
 Claude Codeが開発に入る前に読み込む要件定義書。
 実装の判断に迷ったときはここに立ち返ること。
+
+**v2.12の主な変更（F-10/F-11実装＝実行時セキュリティの多層防御を完成させる）**
+- **F-11 Model Armor（実行時セマンティックFW）を実装**：発注文がモデルに到達する前に、Google CloudのModel Armor APIでプロンプトインジェクション・ジェイルブレイク・悪性URLを検査し、検出時は実行そのものを止める（入口防御）。納品直前には成果物に機密データ（PII・APIキー等）が混ざっていないか最終検査する（出口保護・報告のみ）。判定はSSE `armor` イベントでUIに開示。**フェイルオープン原則**：API未整備の環境（SDK無し・API未有効化・権限不足）では検査をスキップして通常運転＝セキュリティ機能の不調で本体を止めない（intakeと同じ思想）。セットアップは `make armor-setup`（1回だけ）、`HIVE_ARMOR=0` で無効化
+- **F-10 Agent Identity（IAM個別付与）を実装**：全Agentが人間の全権限（ADC）を共有する状態をやめ、A2AのAgentプロセスごとに専用サービスアカウント（hive-designer / hive-implementer / hive-tester）＋最小権限（roles/aiplatform.user のみ）を付与。成り代わり用ADC（impersonated_service_account 形式）を `.run/identity/` に生成し、serve_agents.sh がプロセスごとに `GOOGLE_APPLICATION_CREDENTIALS` を注入する。ファイルが無ければ従来通り＝**導入は任意でロールバック自由**。セットアップは `make identity-setup`（1回だけ）
+- これでF-15（コード生成時の監査）＋F-11（実行時の入力防御）＋F-10（インフラの最小権限）の**三層防御**が揃った
 
 **v2.11の主な変更（F-03ブラッシュアップ＝並列実行と「固まらない」保証）**
 - **fullstackの並列ファンアウト（F-03 Phase 2）**：ADK Workflowの並列分岐＋JoinNodeで、設計書が出た瞬間にAPI班（implementer→tester）と画面班（frontend）が同時に働くグラフに変更。画面はAPIの完成を待たず設計の endpoints（契約）だけを頼りに作る＝「前段出力＝契約」の原則がグラフの形そのものになった。SSEはrunnerの単一ストリームに両班のイベントが自然に混ざって流れるため、キュー合流の配管は不要（ADKの強み）。Workflowは終端ノードを1つしか許さない（実測確認）ためJoinNodeが合流点として必須
@@ -442,16 +447,27 @@ Hiveの設計は、2026年に急浮上した最新パラダイム **ハーネス
   - 次回AgentのためにMemory Bankを最適化
 - デモでの見せ方：「昨日より今日の方が同じミスをしない」を実演
 
-### F-10｜Agent Identity（IAM個別付与）（できたら実施）
+### F-10｜Agent Identity（IAM個別付与）（v2.12実装済み）
 - 各AgentにGCPの正規IAMプリンシパルを個別に割り当て
 - 最小権限の原則を適用し、Agentが操作できるインフラを制限
 - プロンプトインジェクション経由の意図しない操作をインフラレベルで防止
 - 審査の「実装力・本番品質」で加点を狙う
+- **実装（v2.12）**
+  - A2AのAgentプロセス（designer / implementer / tester）ごとに専用SA `hive-<agent>@` を作成し、**roles/aiplatform.user のみ**付与（Gemini呼び出し以外なにもできない封じ込め）
+  - 人間のADCから各SAへの**成り代わり用ADC**（`impersonated_service_account` 形式のJSON）を `.run/identity/` に生成（gitignore済み・0600）。serve_agents.sh が起動時にプロセスごとの `GOOGLE_APPLICATION_CREDENTIALS` として注入する
+  - identityファイルが無いAgentは従来通り人間のADCで動く＝導入は任意・ロールバックは `.run/identity/` を消すだけ
+  - セットアップ：`make identity-setup`（SA作成・権限付与・ADC生成を冪等に実行）
+  - 将来Cloud Run / Agent Engineへデプロイする際は、同じSAをサービス実行IDに割り当てれば設計がそのまま持ち上がる（GCPの「Agent Identity」正式機能への移行パス）
 
-### F-11｜Model Armor（セマンティックFW）（できたら実施）
+### F-11｜Model Armor（セマンティックFW）（v2.12実装済み）
 - プロンプトインジェクション・ジェイルブレイク試行をモデルへの到達前にブロック
 - 出力保護：クレジットカード番号・APIキー等のPIIを自動マスク（150種類以上）
-- Agent Engineとの統合設定
+- **実装（v2.12）**
+  - `shared/armor.py`：Model Armor APIラッパー。入口 `sanitize_prompt`（発注文の検査・検出時は実行を停止）と出口 `sanitize_response`（納品物の機密データ検査・報告のみで納品は止めない）
+  - orchestratorの `task_received` 直後に入口検査、`done` 直前に出口検査を差し込み、判定をSSE `armor` イベント（stage=prompt/response・allowed・matched）でUIに開示。タイムラインには 🛡️ カードで表示
+  - **フェイルオープン原則**：SDK未導入・API未有効化・権限不足では `checked=false` でスキップして通常運転（セキュリティ機能の不調で本体を止めない）。API呼び出しは10秒タイムアウト（F-03「固まらない」保証と整合）
+  - テンプレート `hive-guard`（インジェクション/ジェイルブレイク=中確度以上・悪性URL・機密データ基本検出）を `make armor-setup` で作成。Model Armorはリージョナル API のため `HIVE_ARMOR_LOCATION`（既定 us-central1）を Vertex の location とは独立に持つ
+  - オフスイッチ：`HIVE_ARMOR=0`
 
 ### F-12｜Rewindを使った行動の木探索（チャレンジ枠・P2）
 - **ADK 2.x の Rewind / resume を本来の用途とズラして使う「意外性」狙いの目玉機能**
