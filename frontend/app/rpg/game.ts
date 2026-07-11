@@ -1,15 +1,44 @@
 /**
- * ドラクエ風RPG描画（要件 F-14・M7）。
+ * ドラクエ風RPG描画（要件 F-14・v2.13）。
  *
- * M3のSSEイベントストリームを「キャラが中央に出て働き、持ち場に戻る」として
+ * M3のSSEイベントストリームを「ギルドの作業場ではたらくキャラたち」として
  * 描くだけの表示層。データ（イベント）と描画の分離が原則で、ここにビジネス
  * ロジックは置かない。サウンドは実装しない（要件で明示的に対象外）。
+ *
+ * v2.13の振付原則：
+ * - 働くときは自分の机で働く（F-03の並列実行を画面でもそのまま同時に描く）
+ * - 演出キューはシーン1本ではなくキャラごとの行動キュー
+ * - handoffは相手の机まで歩いて行って渡す（瞬間移動しない）
+ * - イベントが無い時間もアイドル行動（まばたき・うろつき・💤）で生きて見せる
  *
  * 表示名の原則（F-14）：キャラの見た目は職業風だが、画面に出す名前は
  * 一般の人でも工程がわかる役割名（設計担当・実装担当・テスト担当・セキュリティ監査）。
  */
 
 import * as Phaser from "phaser";
+
+import { CHARS, registerAllChars, registerEmotes, type EmoteKind, type Facing } from "./sprites";
+import {
+  BOARD,
+  DESK_ROW,
+  DOOR,
+  ENTRANCE,
+  H,
+  INSPECT,
+  SHELF,
+  STAND_ROW,
+  TABLE,
+  TORCHES,
+  TS,
+  W,
+  buildGrid,
+  deskCols,
+  drawGround,
+  findPath,
+  registerWorldTextures,
+  tileXY,
+  type Tile,
+} from "./world";
 
 export type HiveEvent = { type: string; data: Record<string, unknown> };
 
@@ -19,9 +48,6 @@ export type HiveGame = {
   replay: (events: HiveEvent[]) => void;
   destroy: () => void;
 };
-
-const W = 760;
-const H = 540;
 
 // 既知のAgentの表示名カタログ。実際の編成（パーティ）は router イベントが運んでくる
 // （F-02 動的エージェント組成：タスクによって働くAgentが変わる）
@@ -33,175 +59,6 @@ const LABEL: Record<string, string> = {
   security_reviewer: "セキュリティ監査",
 };
 
-const STAGE = { x: 380, y: 210 };
-const HOME_Y = 330;
-
-// --- ドット絵定義（12x14・'.'は透過） -------------------------------------
-// A=帽子/頭, S=肌, E=目, B=胴, L=脚, F=足, X=アクセント
-const SPRITES: Record<string, { rows: string[]; palette: Record<string, string> }> = {
-  designer: {
-    // とんがり帽子のローブ姿（魔法使い風）
-    rows: [
-      ".....AA.....",
-      "....AAAA....",
-      "...AAAAAA...",
-      "..AAAAAAAA..",
-      "...SSSSSS...",
-      "...SESSES...",
-      "...SSSSSS...",
-      "..BBBBBBBB..",
-      ".BBBBBBBBBB.",
-      ".BBXBBBBXBB.",
-      ".BBBBBBBBBB.",
-      "..BBBBBBBB..",
-      "...LL..LL...",
-      "...FF..FF...",
-    ],
-    palette: {
-      A: "#7c3aed", S: "#fcd7b0", E: "#1f2937", B: "#8b5cf6",
-      X: "#fbbf24", L: "#374151", F: "#1f2937",
-    },
-  },
-  implementer: {
-    // 兜と鎧（戦士風）
-    rows: [
-      "..X......X..",
-      "...AAAAAA...",
-      "..AAAAAAAA..",
-      "..AAAAAAAA..",
-      "...SSSSSS...",
-      "...SESSES...",
-      "...SSSSSS...",
-      "..BBBBBBBB..",
-      ".BBXXBBXXBB.",
-      ".BBBBBBBBBB.",
-      ".BBBBBBBBBB.",
-      "..BBBBBBBB..",
-      "...LL..LL...",
-      "...FF..FF...",
-    ],
-    palette: {
-      A: "#9ca3af", S: "#fcd7b0", E: "#1f2937", B: "#f59e0b",
-      X: "#6b7280", L: "#374151", F: "#1f2937",
-    },
-  },
-  tester: {
-    // フードのローブ姿（僧侶風）
-    rows: [
-      "....AAAA....",
-      "...AAAAAA...",
-      "..AAAAAAAA..",
-      "..AASSSSAA..",
-      "...SESSES...",
-      "...SSSSSS...",
-      "..BBBBBBBB..",
-      ".BBBBXXBBBB.",
-      ".BBBBXXBBBB.",
-      ".BBBBBBBBBB.",
-      ".BBBBBBBBBB.",
-      "..BBBBBBBB..",
-      "...LL..LL...",
-      "...FF..FF...",
-    ],
-    palette: {
-      A: "#7dd3fc", S: "#fcd7b0", E: "#1f2937", B: "#38bdf8",
-      X: "#f8fafc", L: "#374151", F: "#1f2937",
-    },
-  },
-  security_reviewer: {
-    // 盾を構えた衛兵風
-    rows: [
-      "...AAAAAA...",
-      "..AAAAAAAA..",
-      "..AXXXXXXA..",
-      "...SSSSSS...",
-      "...SESSES...",
-      "...SSSSSS...",
-      "..BBBBBBBB..",
-      "XXXBBBBBBBB.",
-      "XXXBBBBBBBB.",
-      "XXXBBBBBBBB.",
-      ".BBBBBBBBBB.",
-      "..BBBBBBBB..",
-      "...LL..LL...",
-      "...FF..FF...",
-    ],
-    palette: {
-      A: "#fb7185", S: "#fcd7b0", E: "#1f2937", B: "#e11d48",
-      X: "#facc15", L: "#374151", F: "#1f2937",
-    },
-  },
-  frontend: {
-    // ベレー帽と筆（画面職人風）
-    rows: [
-      "..AAAAAAA...",
-      ".AAAAAAAAA..",
-      "..AAAAAA....",
-      "...SSSSSS...",
-      "...SESSES...",
-      "...SSSSSS...",
-      "..BBBBBBBB..",
-      ".BBBBBBBBXX.",
-      ".BBXBBBBBXX.",
-      ".BBBBBBBBBB.",
-      "..BBBBBBBB..",
-      "...LL..LL...",
-      "...LL..LL...",
-      "...FF..FF...",
-    ],
-    palette: {
-      A: "#0d9488", S: "#fcd7b0", E: "#1f2937", B: "#2dd4bf",
-      X: "#f59e0b", L: "#374151", F: "#1f2937",
-    },
-  },
-  // F-13 交代後の画面担当（上位モデル）：金のベレー
-  frontend_pro: {
-    rows: [
-      "..AAAAAAA...",
-      ".AAAAAAAAA..",
-      "..AAAAAA....",
-      "...SSSSSS...",
-      "...SESSES...",
-      "...SSSSSS...",
-      "..BBBBBBBB..",
-      ".BBBBBBBBXX.",
-      ".BBXBBBBBXX.",
-      ".BBBBBBBBBB.",
-      "..BBBBBBBB..",
-      "...LL..LL...",
-      "...LL..LL...",
-      "...FF..FF...",
-    ],
-    palette: {
-      A: "#fbbf24", S: "#fcd7b0", E: "#1f2937", B: "#a855f7",
-      X: "#fde68a", L: "#374151", F: "#1f2937",
-    },
-  },
-  // F-13 交代後の実装担当（上位モデル）：金色の鎧
-  implementer_pro: {
-    rows: [
-      "..X......X..",
-      "...AAAAAA...",
-      "..AAAAAAAA..",
-      "..AAAAAAAA..",
-      "...SSSSSS...",
-      "...SESSES...",
-      "...SSSSSS...",
-      "..BBBBBBBB..",
-      ".BBXXBBXXBB.",
-      ".BBBBBBBBBB.",
-      ".BBBBBBBBBB.",
-      "..BBBBBBBB..",
-      "...LL..LL...",
-      "...FF..FF...",
-    ],
-    palette: {
-      A: "#fbbf24", S: "#fcd7b0", E: "#1f2937", B: "#a855f7",
-      X: "#fde68a", L: "#374151", F: "#1f2937",
-    },
-  },
-};
-
 const FONT = {
   fontFamily: "'DotGothic16', 'MS Gothic', monospace",
   color: "#ffffff",
@@ -209,34 +66,73 @@ const FONT = {
 
 // 実装が一瞬で終わるタスクでも「働いている感」が出る最低演出時間
 const MIN_WORK_MS = 2600;
+const WALK_MS = 150; // 1タイルの歩行時間
+const CHAR_SCALE = 4;
+const EMOTE_Y = 62; // 頭上エモートの高さ
+const DEPTH_UI = 1500; // ステータス窓
+const DEPTH_MSG = 2000; // メッセージウィンドウ
+
+const STATUS_COLOR = {
+  wait: "#9ca3af",
+  work: "#fbbf24",
+  done: "#34d399",
+  audit: "#fb7185",
+  danger: "#f87171",
+  power: "#c084fc",
+} as const;
+
+type Actor = {
+  name: string;
+  sprite: Phaser.GameObjects.Image;
+  emote: Phaser.GameObjects.Image;
+  emoteKind: EmoteKind | null;
+  statusText: Phaser.GameObjects.Text;
+  tile: Tile;
+  facing: Facing;
+  flip: boolean;
+  stand: Tile;
+  queue: (() => Promise<void>)[];
+  running: boolean;
+  working: boolean;
+  workFx: { bob?: Phaser.Tweens.Tween; spark?: Phaser.Time.TimerEvent };
+  pro: boolean;
+  /** 実イベントが最後に触った時刻（💤の判定。アイドル行動ではリセットしない） */
+  lastEvent: number;
+  /** 何かの行動が最後に終わった時刻（アイドル行動のペース配分） */
+  lastActive: number;
+};
 
 class HiveRpgScene extends Phaser.Scene {
-  private queue: HiveEvent[] = [];
-  private busy = false;
-
-  private chars = new Map<string, Phaser.GameObjects.Image>();
-  private bubbles = new Map<string, Phaser.GameObjects.Text>();
-  private statusText = new Map<string, Phaser.GameObjects.Text>();
-  /** 持ち場（編成人数に応じて spawnParty が計算する） */
-  private homes = new Map<string, { x: number; y: number }>();
-  /** 編成ごとに作り直すUI（ステータス窓など） */
+  private actors = new Map<string, Actor>();
   private partyUi: Phaser.GameObjects.GameObject[] = [];
+  private grid: boolean[][] = buildGrid([]);
+
   private messages: string[] = [];
+  private typingLine = "";
+  private msgQueue: string[] = [];
+  private typing = false;
   private messageText!: Phaser.GameObjects.Text;
-  private centered: string | null = null;
-  /** 各Agentが働き始めた時刻（最低演出時間の計算用） */
-  private startedAt = new Map<string, number>();
+  private cursor!: Phaser.GameObjects.Text;
+
   /** handoff で受け取った「次は何をするか」をagent_startの台詞に使う */
   private pendingDetail = new Map<string, string>();
+  private startedAt = new Map<string, number>();
+
   private ready = false;
+  private preQueue: HiveEvent[] = [];
   private pendingReplay: HiveEvent[] | null = null;
+  private destroyed = false;
 
   constructor() {
     super("hive-rpg");
   }
 
   enqueue(e: HiveEvent) {
-    this.queue.push(e);
+    if (!this.ready) {
+      this.preQueue.push(e);
+      return;
+    }
+    this.dispatch(e);
   }
 
   /** 過去イベントを瞬間適用して途中状態を復元する。create前に呼ばれたら保留する。 */
@@ -245,37 +141,29 @@ class HiveRpgScene extends Phaser.Scene {
       this.pendingReplay = events;
       return;
     }
-    this.tweens.killAll();
-    this.queue = [];
-    this.busy = false;
-    this.messages = [];
-    this.messageText.setText("");
     this.clearParty();
+    this.msgQueue = [];
+    this.typing = false;
+    this.typingLine = "";
+    this.messages = [];
+    this.renderMessages();
     if (events.length === 0) {
       this.addMessage("クエストを 発注すると オーケストレーターが はたらきバチを へんせいする…");
       return;
     }
     for (const e of events) this.applyInstant(e);
-    // spawnParty の登場アニメ等が適用後に位置を動かさないよう止め、最終位置を確定する
-    this.tweens.killAll();
-    this.chars.forEach((_, name) => {
-      if (name === this.centered) {
-        this.placeAt(name, STAGE.x, STAGE.y);
-        this.setBubble(name, "…");
-      } else {
-        const home = this.homes.get(name);
-        if (home) this.placeAt(name, home.x, home.y);
-      }
-    });
+    this.renderMessages();
   }
 
   create() {
-    this.cameras.main.setBackgroundColor("#0a0f0a");
-    for (const [key, def] of Object.entries(SPRITES)) {
-      this.makeTexture(key, def.rows, def.palette);
-    }
-    this.drawGround();
+    this.cameras.main.setBackgroundColor("#100d16");
+    registerWorldTextures(this);
+    registerAllChars(this);
+    registerEmotes(this);
+    drawGround(this);
+    this.placeFurnitureBase();
     this.drawMessageWindow();
+    this.time.addEvent({ delay: 1100, loop: true, callback: () => this.idleTick() });
     this.addMessage("クエストを 発注すると オーケストレーターが はたらきバチを へんせいする…");
     this.ready = true;
     if (this.pendingReplay) {
@@ -283,422 +171,693 @@ class HiveRpgScene extends Phaser.Scene {
       this.pendingReplay = null;
       this.replay(events);
     }
+    for (const e of this.preQueue.splice(0)) this.dispatch(e);
+    this.events.once(Phaser.Scenes.Events.DESTROY, () => {
+      this.destroyed = true;
+    });
   }
 
-  /** 編成を片付ける（再編成・リプレイの前処理）。 */
+  // --- 舞台の常設物 -----------------------------------------------------------
+
+  private placeFurnitureBase() {
+    // 中央テーブル（キャラより上＝南側を歩くと手前に来るよう底辺で深度を決める）
+    this.add
+      .image(TABLE.c1 * TS, TABLE.r1 * TS, "furn.table")
+      .setOrigin(0, 0)
+      .setScale(3)
+      .setDepth((TABLE.r2 + 1) * TS - 6);
+    // たいまつ（ゆらめく炎）
+    const flames: Phaser.GameObjects.Image[] = [];
+    for (const c of TORCHES) {
+      const x = c * TS + TS / 2;
+      this.add.image(x, TS + 34, "deco.sconce").setScale(3).setDepth(2);
+      flames.push(this.add.image(x, TS + 16, "fx.flame0").setScale(3).setDepth(3));
+    }
+    this.time.addEvent({
+      delay: 240,
+      loop: true,
+      callback: () => {
+        for (const f of flames) {
+          f.setTexture(Math.random() < 0.5 ? "fx.flame0" : "fx.flame1");
+          f.setAlpha(0.85 + Math.random() * 0.15);
+        }
+      },
+    });
+  }
+
+  // --- パーティ編成 -----------------------------------------------------------
+
   private clearParty() {
+    this.tweens.killAll();
+    this.actors.forEach((a) => {
+      a.workFx.spark?.remove();
+      a.sprite.destroy();
+      a.emote.destroy();
+      a.queue = [];
+    });
+    this.actors.clear();
     for (const obj of this.partyUi) obj.destroy();
     this.partyUi = [];
-    this.chars.forEach((c) => c.destroy());
-    this.bubbles.forEach((b) => b.destroy());
-    this.chars.clear();
-    this.bubbles.clear();
-    this.statusText.clear();
-    this.homes.clear();
-    this.centered = null;
+    this.pendingDetail.clear();
+    this.startedAt.clear();
+    this.grid = buildGrid([]);
   }
 
   /** router の編成結果に従ってパーティを出現させる（F-02 動的エージェント組成）。 */
-  private spawnParty(party: { agent: string; role: string }[]) {
+  private spawnParty(party: { agent: string; role: string }[], instant: boolean) {
     this.clearParty();
+    const cols = deskCols(party.length);
+    this.grid = buildGrid(cols.slice(0, party.length));
 
-    const n = party.length;
-    const winW = Math.min(180, Math.floor((W - 16) / n) - 6);
     party.forEach(({ agent, role }, i) => {
-      // ステータス窓（なまえ・じょうたい）
-      const x = 8 + i * (winW + 6);
-      this.partyUi.push(this.drawWindow(x, 8, winW, 58));
+      const c = cols[i];
+      const deskX = c * TS + TS / 2;
+      // 机（持ち場）
+      this.partyUi.push(
+        this.add
+          .image(deskX, (DESK_ROW + 1) * TS, "furn.desk")
+          .setOrigin(0.5, 1)
+          .setScale(3)
+          .setDepth((DESK_ROW + 1) * TS - 6),
+      );
+      // ステータス窓（なまえ・じょうたい）を机の下に
+      const px = deskX - 66;
+      this.partyUi.push(this.drawWindow(px, 338, 132, 46, DEPTH_UI));
       const name = this.add
-        .text(x + 10, 16, LABEL[agent] ?? role ?? agent, { ...FONT, fontSize: "12px" })
-        .setResolution(2);
-      const st = this.add
-        .text(x + 10, 38, "じょうたい：まち", { ...FONT, fontSize: "11px", color: "#9ca3af" })
-        .setResolution(2);
-      this.partyUi.push(name, st);
-      this.statusText.set(agent, st);
-      // キャラ（編成人数で持ち場を等間隔に割り付け、上から降ってきて参加）
-      const hx = Math.round((W / (n + 1)) * (i + 1));
-      this.homes.set(agent, { x: hx, y: HOME_Y });
-      const texKey = this.textures.exists(agent) ? agent : "implementer";
-      const img = this.add.image(hx, HOME_Y - 40, texKey).setScale(4).setOrigin(0.5, 1);
-      this.chars.set(agent, img);
-      const bubble = this.add
-        .text(hx, HOME_Y - 64, "", { ...FONT, fontSize: "18px" })
-        .setOrigin(0.5, 1);
-      this.bubbles.set(agent, bubble);
-      this.tweens.add({
-        targets: img,
-        y: HOME_Y,
-        duration: 320,
-        ease: "Bounce.easeOut",
-        delay: i * 110,
-      });
+        .text(px + 9, 344, LABEL[agent] ?? role ?? agent, { ...FONT, fontSize: "11px" })
+        .setResolution(2)
+        .setDepth(DEPTH_UI + 1);
+      const status = this.add
+        .text(px + 9, 362, "じょうたい：まち", {
+          ...FONT,
+          fontSize: "10px",
+          color: STATUS_COLOR.wait,
+        })
+        .setResolution(2)
+        .setDepth(DEPTH_UI + 1);
+      this.partyUi.push(name, status);
+
+      // キャラ本体
+      const stand: Tile = { c, r: STAND_ROW };
+      const texKey = CHARS[agent] ? agent : "implementer";
+      const start = instant ? tileXY(stand) : tileXY(DOOR);
+      const sprite = this.add
+        .image(start.x, start.y, `${texKey}.down0`)
+        .setScale(CHAR_SCALE)
+        .setOrigin(0.5, 1)
+        .setAlpha(instant ? 1 : 0);
+      const emote = this.add.image(start.x, start.y - EMOTE_Y, "emote.think").setScale(3).setVisible(false);
+      const actor: Actor = {
+        name: texKey,
+        sprite,
+        emote,
+        emoteKind: null,
+        statusText: status,
+        tile: instant ? stand : { ...ENTRANCE },
+        facing: "down",
+        flip: false,
+        stand,
+        queue: [],
+        running: false,
+        working: false,
+        workFx: {},
+        pro: false,
+        lastEvent: this.time.now,
+        lastActive: this.time.now,
+      };
+      this.actors.set(agent, actor);
+      this.follow(actor);
+
+      if (!instant) {
+        // ギルドの扉から一人ずつ入場して持ち場へ歩く
+        this.pushAction(agent, async () => {
+          await this.sleep(200 + i * 480);
+          this.face(actor, "down");
+          sprite.setAlpha(1);
+          await this.tweenP({
+            targets: sprite,
+            y: tileXY(ENTRANCE).y,
+            duration: WALK_MS * 2,
+            onUpdate: () => this.walkFrame(actor),
+          });
+          actor.tile = { ...ENTRANCE };
+          await this.walkTo(actor, stand);
+          this.face(actor, "down");
+        });
+      }
     });
   }
 
-  update() {
-    if (!this.busy && this.queue.length > 0) {
-      this.busy = true;
-      this.handle(this.queue.shift() as HiveEvent);
+  // --- キャラの基本動作 -------------------------------------------------------
+
+  private texBase(a: Actor): string {
+    return a.pro && CHARS[`${a.name}_pro`] ? `${a.name}_pro` : a.name;
+  }
+
+  private setFrame(a: Actor, phase: 0 | 1) {
+    a.sprite.setTexture(`${this.texBase(a)}.${a.facing}${phase}`);
+    a.sprite.setFlipX(a.facing === "side" && a.flip);
+  }
+
+  private face(a: Actor, facing: Facing, flip = false) {
+    a.facing = facing;
+    a.flip = flip;
+    this.setFrame(a, 0);
+  }
+
+  private faceToward(a: Actor, x: number) {
+    this.face(a, "side", x < a.sprite.x);
+  }
+
+  private walkFrame(a: Actor) {
+    this.setFrame(a, (Math.floor(this.time.now / 130) % 2) as 0 | 1);
+    this.follow(a);
+  }
+
+  private follow(a: Actor) {
+    a.sprite.setDepth(a.sprite.y);
+    a.emote.setPosition(a.sprite.x, a.sprite.y - EMOTE_Y).setDepth(a.sprite.y + 1);
+  }
+
+  private async walkTo(a: Actor, dest: Tile) {
+    const path = findPath(this.grid, a.tile, dest);
+    for (const step of path) {
+      const dc = step.c - a.tile.c;
+      if (dc !== 0) {
+        a.facing = "side";
+        a.flip = dc < 0;
+      } else {
+        a.facing = step.r - a.tile.r > 0 ? "down" : "up";
+      }
+      const { x, y } = tileXY(step);
+      await this.tweenP({
+        targets: a.sprite,
+        x,
+        y,
+        duration: WALK_MS,
+        onUpdate: () => this.walkFrame(a),
+      });
+      a.tile = step;
+    }
+    this.setFrame(a, 0);
+    this.follow(a);
+  }
+
+  private setEmote(a: Actor, kind: EmoteKind | null) {
+    a.emoteKind = kind;
+    if (kind) a.emote.setTexture(`emote.${kind}`).setVisible(true);
+    else a.emote.setVisible(false);
+    this.follow(a);
+  }
+
+  private setStatus(agent: string, state: string, color: string) {
+    this.actors.get(agent)?.statusText.setText(`じょうたい：${state}`).setColor(color);
+  }
+
+  private startWork(a: Actor) {
+    if (a.working) return;
+    a.working = true;
+    this.setEmote(a, "think");
+    const baseY = tileXY(a.tile).y;
+    a.workFx.bob = this.tweens.add({
+      targets: a.sprite,
+      y: baseY - 3,
+      duration: 270,
+      yoyo: true,
+      repeat: -1,
+      onUpdate: () => this.follow(a),
+    });
+    a.workFx.spark = this.time.addEvent({
+      delay: 2700,
+      loop: true,
+      callback: () => this.sparkle(a.sprite.x + 14, a.sprite.y + 20, 0xfde047, 3),
+    });
+  }
+
+  private stopWork(a: Actor) {
+    a.working = false;
+    a.workFx.bob?.remove();
+    a.workFx.spark?.remove();
+    a.workFx = {};
+    a.sprite.setY(tileXY(a.tile).y);
+    if (a.emoteKind === "think") this.setEmote(a, null);
+    this.follow(a);
+  }
+
+  // --- キャラごとの行動キュー ---------------------------------------------------
+
+  private pushAction(agent: string, fn: () => Promise<void>, isEvent = true) {
+    const a = this.actors.get(agent);
+    if (!a) return;
+    if (isEvent) a.lastEvent = this.time.now;
+    a.queue.push(fn);
+    if (!a.running) void this.pumpActor(a);
+  }
+
+  private async pumpActor(a: Actor) {
+    a.running = true;
+    while (a.queue.length > 0 && !this.destroyed) {
+      if (a.emoteKind === "sleep") this.setEmote(a, null);
+      const fn = a.queue.shift() as () => Promise<void>;
+      try {
+        await fn();
+      } catch {
+        /* 演出の失敗でキューを止めない */
+      }
+      a.lastActive = this.time.now;
+    }
+    a.running = false;
+  }
+
+  /** 待機中のキャラに命を吹き込む（まばたき・うろつき・💤）。 */
+  private idleTick() {
+    this.actors.forEach((a) => {
+      if (a.working || a.running || a.queue.length > 0) return;
+      const sinceEvent = this.time.now - a.lastEvent;
+      if (sinceEvent > 45000) {
+        if (a.emoteKind !== "sleep") this.setEmote(a, "sleep");
+        return;
+      }
+      if (this.time.now - a.lastActive < 2600 || Math.random() > 0.3) return;
+      const roll = Math.random();
+      if (roll < 0.5 && a.facing === "down") {
+        // まばたき
+        this.pushAction(
+          this.keyOf(a),
+          async () => {
+            a.sprite.setTexture(`${this.texBase(a)}.blink`);
+            await this.sleep(140);
+            this.setFrame(a, 0);
+          },
+          false,
+        );
+      } else if (roll < 0.8) {
+        // 近くをうろつく
+        const spots: Tile[] = [
+          { c: a.stand.c - 1, r: a.stand.r },
+          { c: a.stand.c + 1, r: a.stand.r },
+          { c: a.stand.c, r: a.stand.r - 1 },
+        ].filter((t) => this.grid[t.r]?.[t.c]);
+        if (spots.length === 0) return;
+        const spot = spots[Math.floor(Math.random() * spots.length)];
+        this.pushAction(
+          this.keyOf(a),
+          async () => {
+            await this.walkTo(a, spot);
+            await this.sleep(500 + Math.random() * 700);
+            await this.walkTo(a, a.stand);
+            this.face(a, "down");
+          },
+          false,
+        );
+      } else {
+        // よそ見
+        this.pushAction(
+          this.keyOf(a),
+          async () => {
+            this.face(a, "side", Math.random() < 0.5);
+            await this.sleep(700);
+            this.face(a, "down");
+          },
+          false,
+        );
+      }
+    });
+  }
+
+  private keyOf(a: Actor): string {
+    for (const [key, actor] of this.actors) if (actor === a) return key;
+    return a.name;
+  }
+
+  // --- エフェクト -------------------------------------------------------------
+
+  private sparkle(x: number, y: number, color: number, n = 6) {
+    for (let i = 0; i < n; i++) {
+      const s = this.add
+        .image(x, y, "fx.spark")
+        .setScale(2 + Math.random() * 2)
+        .setTint(color)
+        .setDepth(1200);
+      this.tweens.add({
+        targets: s,
+        x: x + (Math.random() - 0.5) * 64,
+        y: y - 10 - Math.random() * 34,
+        alpha: 0,
+        duration: 480 + Math.random() * 320,
+        onComplete: () => s.destroy(),
+      });
     }
   }
 
-  // --- 描画部品 -------------------------------------------------------------
-
-  private makeTexture(key: string, rows: string[], palette: Record<string, string>) {
-    const w = rows[0].length;
-    const h = rows.length;
-    const canvas = this.textures.createCanvas(key, w, h);
-    if (!canvas) return;
-    const ctx = canvas.getContext();
-    rows.forEach((row, y) => {
-      [...row].forEach((ch, x) => {
-        const color = palette[ch];
-        if (color) {
-          ctx.fillStyle = color;
-          ctx.fillRect(x, y, 1, 1);
-        }
-      });
+  private glowShelf(color: number) {
+    const g = this.add
+      .rectangle(SHELF.c * TS, SHELF.r * TS, SHELF.w * TS, TS, color, 0.4)
+      .setOrigin(0, 0)
+      .setDepth(10)
+      .setAlpha(0);
+    this.tweens.add({
+      targets: g,
+      alpha: 1,
+      duration: 350,
+      yoyo: true,
+      repeat: 2,
+      onComplete: () => g.destroy(),
     });
-    canvas.refresh();
+    this.sparkle(SHELF.c * TS + (SHELF.w * TS) / 2, SHELF.r * TS + TS / 2, color, 5);
   }
 
+  private tableCenter() {
+    return { x: TABLE.c1 * TS + TS, y: TABLE.r1 * TS + TS };
+  }
+
+  private magicCircle() {
+    const { x, y } = this.tableCenter();
+    const g = this.add.graphics().setDepth(1100);
+    g.lineStyle(3, 0x67e8f9, 0.9).strokeEllipse(x, y + 26, 108, 44);
+    g.lineStyle(2, 0x22d3ee, 0.7).strokeEllipse(x, y + 26, 76, 30);
+    g.setAlpha(0);
+    this.tweens.add({
+      targets: g,
+      alpha: 1,
+      duration: 300,
+      yoyo: true,
+      repeat: 3,
+      onComplete: () => g.destroy(),
+    });
+  }
+
+  private confetti() {
+    const colors = [0xf87171, 0xfbbf24, 0x34d399, 0x60a5fa, 0xc084fc, 0xf8fafc];
+    for (let i = 0; i < 44; i++) {
+      const x = W / 2 + (Math.random() - 0.5) * 420;
+      const piece = this.add
+        .image(x, 40 + Math.random() * 60, "fx.confetti")
+        .setScale(2 + Math.random() * 2)
+        .setTint(colors[i % colors.length])
+        .setDepth(1300)
+        .setAlpha(0.95);
+      this.tweens.add({
+        targets: piece,
+        y: 320 + Math.random() * 60,
+        x: x + (Math.random() - 0.5) * 90,
+        angle: (Math.random() - 0.5) * 360,
+        alpha: 0,
+        duration: 1500 + Math.random() * 900,
+        delay: Math.random() * 500,
+        ease: "Sine.easeIn",
+        onComplete: () => piece.destroy(),
+      });
+    }
+  }
+
+  // --- メッセージウィンドウ（タイプライター＋▼点滅） ---------------------------
+
   /** ドラクエ風ウィンドウ（黒地・白の二重枠）。 */
-  private drawWindow(x: number, y: number, w: number, h: number) {
-    const g = this.add.graphics();
+  private drawWindow(x: number, y: number, w: number, h: number, depth: number) {
+    const g = this.add.graphics().setDepth(depth);
     g.fillStyle(0x000000, 0.92).fillRoundedRect(x, y, w, h, 6);
     g.lineStyle(2, 0xffffff, 1).strokeRoundedRect(x + 2, y + 2, w - 4, h - 4, 5);
     g.lineStyle(1, 0xffffff, 0.6).strokeRoundedRect(x + 5, y + 5, w - 10, h - 10, 4);
     return g;
   }
 
-  private drawGround() {
-    const g = this.add.graphics();
-    g.fillStyle(0x14532d, 0.35);
-    for (let y = 120; y < 360; y += 24) {
-      for (let x = 24 + (y % 48 === 0 ? 12 : 0); x < W - 16; x += 24) {
-        g.fillRect(x, y, 3, 3);
-      }
-    }
-  }
-
   private drawMessageWindow() {
-    this.drawWindow(8, H - 110, W - 16, 102);
+    this.drawWindow(8, 392, W - 16, H - 400, DEPTH_MSG);
     this.messageText = this.add
-      .text(24, H - 96, "", { ...FONT, fontSize: "15px", lineSpacing: 8, wordWrap: { width: W - 48 } })
-      .setResolution(2);
+      .text(26, 406, "", { ...FONT, fontSize: "15px", lineSpacing: 9, wordWrap: { width: W - 52 } })
+      .setResolution(2)
+      .setDepth(DEPTH_MSG + 1);
+    this.cursor = this.add
+      .text(W - 34, H - 28, "▼", { ...FONT, fontSize: "13px" })
+      .setResolution(2)
+      .setDepth(DEPTH_MSG + 1);
+    this.time.addEvent({
+      delay: 420,
+      loop: true,
+      callback: () => this.cursor.setVisible(!this.typing && !this.cursor.visible),
+    });
   }
 
   private addMessage(text: string) {
-    this.messages.push(`▼ ${text}`);
-    this.messages = this.messages.slice(-3);
-    this.messageText.setText(this.messages.join("\n"));
+    this.msgQueue.push(text);
+    void this.pumpMessages();
   }
 
-  private setStatus(name: string, state: string, color = "#ffffff") {
-    this.statusText.get(name)?.setText(`じょうたい：${state}`).setColor(color);
+  private commitLine(line: string) {
+    this.messages = [...this.messages, line].slice(-3);
+    this.typingLine = "";
+    this.renderMessages();
   }
 
-  private setBubble(name: string, text: string) {
-    this.bubbles.get(name)?.setText(text);
+  private renderMessages() {
+    const lines = this.typingLine
+      ? [...this.messages.slice(-2), this.typingLine]
+      : this.messages;
+    this.messageText?.setText(lines.join("\n"));
   }
 
-  private moveChar(name: string, x: number, y: number, onDone?: () => void) {
-    const img = this.chars.get(name);
-    const bubble = this.bubbles.get(name);
-    if (!img) return onDone?.();
-    this.tweens.add({
-      targets: img,
-      x,
-      y,
-      duration: 550,
-      ease: "Sine.easeInOut",
-      onUpdate: () => bubble?.setPosition(img.x, img.y - 64),
-      onComplete: () => onDone?.(),
-    });
-    // 歩いている感を出す小さな上下バウンド
-    this.tweens.add({ targets: img, scaleY: 3.85, duration: 110, yoyo: true, repeat: 4 });
-  }
-
-  /** 中央ステージへ。既に中央にいる場合は何もしない（監査の二重イベント対策）。 */
-  private walkToCenter(name: string, onDone: () => void) {
-    if (this.centered === name) return onDone();
-    const goCenter = () => {
-      this.centered = name;
-      this.moveChar(name, STAGE.x, STAGE.y, onDone);
-    };
-    // 別のキャラが中央に居たら先に持ち場へ帰す
-    if (this.centered && this.centered !== name) {
-      const prev = this.centered;
-      const home = this.homes.get(prev);
-      this.centered = null;
-      this.setBubble(prev, "");
-      if (home) this.moveChar(prev, home.x, home.y, goCenter);
-      else goCenter();
-    } else {
-      goCenter();
+  private async pumpMessages() {
+    if (this.typing) return;
+    this.typing = true;
+    while (this.msgQueue.length > 0 && !this.destroyed) {
+      const line = `＊ ${this.msgQueue.shift()}`;
+      // イベントが溜まっているときは文字送りをやめて追いつく（実況を遅延させない）
+      if (this.msgQueue.length >= 2) {
+        this.commitLine(line);
+        continue;
+      }
+      this.typingLine = "";
+      for (const ch of line) {
+        this.typingLine += ch;
+        this.renderMessages();
+        await this.sleep(20);
+        if (this.msgQueue.length >= 2) break;
+      }
+      this.commitLine(line);
+      await this.sleep(140);
     }
+    this.typing = false;
   }
 
-  private walkHome(name: string, onDone?: () => void) {
-    if (this.centered === name) this.centered = null;
-    this.setBubble(name, "");
-    const home = this.homes.get(name);
-    if (!home) return onDone?.();
-    this.moveChar(name, home.x, home.y, onDone);
+  // --- 小さなPromiseユーティリティ ---------------------------------------------
+
+  private sleep(ms: number) {
+    return new Promise<void>((resolve) => this.time.delayedCall(ms, resolve));
   }
 
-  private finish(delay = 250) {
-    this.time.delayedCall(delay, () => {
-      this.busy = false;
+  private tweenP(config: Phaser.Types.Tweens.TweenBuilderConfig | object) {
+    return new Promise<void>((resolve) => {
+      this.tweens.add({
+        ...(config as Phaser.Types.Tweens.TweenBuilderConfig),
+        onComplete: () => resolve(),
+      });
     });
   }
 
-  // --- リプレイ（瞬間復元）----------------------------------------------------
+  // --- イベント → 振付 ---------------------------------------------------------
 
-  private placeAt(agent: string, x: number, y: number) {
-    this.chars.get(agent)?.setPosition(x, y);
-    this.bubbles.get(agent)?.setPosition(x, y - 64);
-  }
-
-  private placeHome(agent: string) {
-    const home = this.homes.get(agent);
-    if (home) this.placeAt(agent, home.x, home.y);
-    this.setBubble(agent, "");
-    if (this.centered === agent) this.centered = null;
-  }
-
-  private placeCenter(agent: string) {
-    if (this.centered && this.centered !== agent) this.placeHome(this.centered);
-    this.centered = agent;
-    this.placeAt(agent, STAGE.x, STAGE.y);
-    this.setBubble(agent, "…");
-  }
-
-  /** 1イベントをアニメーションなしで適用する（handle() の瞬間版）。 */
-  private applyInstant(e: HiveEvent) {
+  private dispatch(e: HiveEvent) {
     const d = e.data;
     const agent = String(d.agent ?? "");
     switch (e.type) {
-      case "task_received":
-        return this.addMessage(`クエスト：${String(d.task ?? "").slice(0, 40)}`);
-      case "router": {
-        const party = (d.party as { agent: string; role: string }[]) ?? [];
-        if (party.length > 0) this.spawnParty(party);
-        const names = party.map((p) => LABEL[p.agent] ?? p.agent).join("・");
-        const rank = String(d.rank ?? "?");
-        const sakusen = String(d.sakusen ?? d.quality ?? "");
-        this.addMessage(
-          `討伐ランク ${rank}${sakusen ? "／さくせん：" + sakusen : ""}${names ? "／なかま：" + names : ""}`,
-        );
-        return;
-      }
-      case "memory_recall": {
-        const lessons = (d.lessons as string[]) ?? [];
-        return this.addMessage(`むかしの きおくを おもいだした：${(lessons[0] ?? "").slice(0, 30)}`);
-      }
-      case "agent_start":
-        if (!this.chars.has(agent)) return;
-        this.setStatus(agent, "しごとちゅう", "#fbbf24");
-        // 復元直後にライブの完了が届いても余計に待たせない
-        this.startedAt.set(agent, this.time.now - MIN_WORK_MS);
-        this.addMessage(`${LABEL[agent] ?? agent}は はたらいている…`);
-        return this.placeCenter(agent);
-      case "agent_output":
-        if (!this.chars.has(agent)) return;
-        this.setStatus(agent, "かんりょう", "#34d399");
-        this.addMessage(`${LABEL[agent] ?? agent}の しごとが おわった`);
-        return this.placeHome(agent);
-      case "handoff": {
-        const from = String(d.from_agent ?? "");
-        const to = String(d.to_agent ?? "");
-        const item = String(d.item ?? "せいかぶつ");
-        const detail = String(d.detail ?? "");
-        if (detail) this.pendingDetail.set(to, detail);
-        this.addMessage(`${LABEL[from] ?? from}が ${item}を ${LABEL[to] ?? to}に わたした`);
-        if (this.chars.has(from)) {
-          this.setStatus(from, "かんりょう", "#34d399");
-          this.placeHome(from);
-        }
-        if (this.chars.has(to)) {
-          this.setStatus(to, "しごとちゅう", "#fbbf24");
-          this.startedAt.set(to, this.time.now - MIN_WORK_MS);
-          this.placeCenter(to);
-        }
-        return;
-      }
-      case "security_start":
-        if (!this.chars.has("security_reviewer")) return;
-        this.setStatus("security_reviewer", "かんさちゅう", "#fb7185");
-        return this.placeCenter("security_reviewer");
-      case "security_result": {
-        const passed = String(d.passed) === "true";
-        this.addMessage(passed ? "セキュリティかんさ クリア" : "ぜいじゃくせいあり！");
-        if (this.chars.has("security_reviewer")) {
-          this.setStatus(
-            "security_reviewer",
-            passed ? "かんりょう" : "ようちゅうい",
-            passed ? "#34d399" : "#f87171",
-          );
-          this.placeHome("security_reviewer");
-        }
-        return;
-      }
-      case "verify_result": {
-        const passed = String(d.passed) === "true";
-        return this.addMessage(passed ? "けんしょう クリア！" : "けんしょう しっぱい…");
-      }
-      case "retry":
-        return this.addMessage(`もういちど ちょうせん！（${String(d.attempt)}/${String(d.max)}）`);
-      case "escalation": {
-        const target = this.chars.has(agent) ? agent : "implementer";
-        if (this.textures.exists(`${target}_pro`)) {
-          this.chars.get(target)?.setTexture(`${target}_pro`);
-        }
-        this.setStatus(target, "パワーアップ", "#c084fc");
-        return this.addMessage("しょうかんかいじょ！ 上位モデルに こうたいした");
-      }
-      case "memory_write":
-        return this.addMessage(`ぼうけんのしょに きろくした：${String(d.title ?? "").slice(0, 30)}`);
-      case "done":
-        return this.addMessage("クエスト かんりょう！ せいかぶつを のうひんした");
-      case "error":
-        return this.addMessage(`エラーが おきた：${String(d.message ?? "").slice(0, 40)}`);
-      default:
-        return;
-    }
-  }
-
-  // --- イベント → 演出 -------------------------------------------------------
-
-  private handle(e: HiveEvent) {
-    const d = e.data;
-    const agent = String(d.agent ?? "");
-    switch (e.type) {
-      case "task_received":
+      case "task_received": {
         this.addMessage(`クエスト：${String(d.task ?? "").slice(0, 40)}`);
-        return this.finish(900);
+        this.sparkle((BOARD.c + 1) * TS, BOARD.r * TS + TS / 2, 0xfbbf24, 6);
+        return;
+      }
+      case "armor": {
+        const allowed = String(d.allowed) !== "false";
+        const checked = String(d.checked) === "true";
+        if (!checked && allowed) return; // 検査スキップは映さない
+        if (String(d.stage) === "prompt") {
+          if (allowed) this.addMessage("けっかい（Model Armor）が 発注文を しらべた ── あんぜん！");
+          else {
+            this.cameras.main.flash(400, 220, 38, 38);
+            const matched = (d.matched as string[]) ?? [];
+            this.addMessage(`けっかいが はつどう！ あやしい発注文を はじいた（${matched.join("・")}）`);
+          }
+        } else {
+          this.addMessage(
+            allowed
+              ? "のうひん前の さいしゅうけんさ ── もんだいなし"
+              : "のうひん前の さいしゅうけんさ ── きけんな内容を けんしゅつ！",
+          );
+        }
+        return;
+      }
+      case "intake_start":
+        return this.addMessage("うけつけが 依頼書を かいている…");
+      case "order_spec": {
+        const what = String(d.what ?? "");
+        if (what) this.addMessage(`依頼書：${what.slice(0, 40)}`);
+        return;
+      }
       case "router": {
         const party = (d.party as { agent: string; role: string }[]) ?? [];
-        if (party.length > 0) this.spawnParty(party);
-        const names = party.map((p) => LABEL[p.agent] ?? p.agent).join("・");
         const rank = String(d.rank ?? "?");
         const sakusen = String(d.sakusen ?? d.quality ?? "");
         const model = String(d.model ?? "").includes("pro") ? "Pro" : "Flash";
         this.addMessage(`クエストなんいど：討伐ランク ${rank}（${String(d.task_type ?? "")}）`);
         if (sakusen) this.addMessage(`さくせん：${sakusen}（モデル ${model}）`);
-        if (names) this.addMessage(`なかま：${names}`);
-        return this.finish(1400);
+        if (party.length > 0) {
+          this.spawnParty(party, false);
+          this.addMessage(`なかま：${party.map((p) => LABEL[p.agent] ?? p.agent).join("・")}`);
+        }
+        return;
       }
       case "memory_recall": {
         const lessons = (d.lessons as string[]) ?? [];
-        this.addMessage(`むかしの きおくを おもいだした：${(lessons[0] ?? "").slice(0, 30)}`);
-        return this.finish(800);
+        this.glowShelf(0xfbbf24);
+        return this.addMessage(
+          `むかしの きおくを おもいだした：${(lessons[0] ?? "").slice(0, 30)}`,
+        );
       }
       case "agent_start": {
-        if (!this.chars.has(agent)) return this.finish(0);
-        this.startedAt.set(agent, this.time.now);
-        this.setStatus(agent, "しごとちゅう", "#fbbf24");
+        if (!this.actors.has(agent)) return;
         const detail = String(d.detail ?? "") || this.pendingDetail.get(agent) || "";
         this.pendingDetail.delete(agent);
-        this.addMessage(
-          detail
-            ? `${LABEL[agent] ?? agent}は 「${detail.slice(0, 28)}」に とりくんでいる…`
-            : `${LABEL[agent] ?? agent}は かんがえている…`,
-        );
-        return this.walkToCenter(agent, () => {
-          this.setBubble(agent, "…");
-          this.finish(300);
+        return this.pushAction(agent, async () => {
+          const a = this.actors.get(agent);
+          if (!a) return;
+          await this.walkTo(a, a.stand);
+          this.face(a, "down");
+          this.startedAt.set(agent, this.time.now);
+          this.setStatus(agent, "しごとちゅう", STATUS_COLOR.work);
+          this.addMessage(
+            detail
+              ? `${LABEL[agent] ?? agent}は 「${detail.slice(0, 28)}」に とりくんでいる…`
+              : `${LABEL[agent] ?? agent}は かんがえている…`,
+          );
+          this.startWork(a);
         });
       }
       case "agent_output": {
-        if (!this.chars.has(agent)) return this.finish(0);
-        // 一瞬で終わったタスクも MIN_WORK_MS は「働いている姿」を見せる
-        const started = this.startedAt.get(agent) ?? 0;
-        const wait = Math.max(0, MIN_WORK_MS - (this.time.now - started));
-        return this.time.delayedCall(wait, () => {
-          this.setBubble(agent, "！");
+        if (!this.actors.has(agent)) return;
+        return this.pushAction(agent, async () => {
+          const a = this.actors.get(agent);
+          if (!a) return;
+          // 一瞬で終わったタスクも MIN_WORK_MS は「働いている姿」を見せる
+          const started = this.startedAt.get(agent) ?? 0;
+          await this.sleep(Math.max(0, MIN_WORK_MS - (this.time.now - started)));
+          this.stopWork(a);
+          this.setEmote(a, "alert");
+          this.setStatus(agent, "かんりょう", STATUS_COLOR.done);
           this.addMessage(`${LABEL[agent] ?? agent}の しごとが おわった`);
-          this.setStatus(agent, "かんりょう", "#34d399");
-          // 直後に受け渡し(handoff)が控えている場合は、その場で待つ（行って戻りを防ぐ）
-          const next = this.queue[0];
-          if (next?.type === "handoff" && String(next.data.from_agent) === agent) {
-            return this.finish(350);
-          }
-          this.time.delayedCall(450, () => this.walkHome(agent, () => this.finish(150)));
+          await this.sleep(800);
+          if (a.emoteKind === "alert") this.setEmote(a, null);
         });
       }
       case "handoff": {
         const from = String(d.from_agent ?? "");
         const to = String(d.to_agent ?? "");
-        if (!this.chars.has(from) || !this.chars.has(to)) return this.finish(0);
         const item = String(d.item ?? "せいかぶつ");
         const detail = String(d.detail ?? "");
         if (detail) this.pendingDetail.set(to, detail);
-        // 2体が中央で向かい合い、会話してタスクを渡す（A2Aの可視化）
-        this.centered = null;
-        this.setBubble(from, "");
-        this.addMessage(`${LABEL[from] ?? from}「${item}が できたぞ！」`);
-        this.setStatus(from, "かんりょう", "#34d399");
-        this.moveChar(from, STAGE.x - 48, STAGE.y);
-        return this.moveChar(to, STAGE.x + 48, STAGE.y, () => {
-          this.setBubble(from, "💬");
-          this.setBubble(to, "…");
-          this.time.delayedCall(1000, () => {
+        const fromA = this.actors.get(from);
+        const toA = this.actors.get(to);
+        if (!fromA || !toA) {
+          this.addMessage(`${LABEL[from] ?? from}が ${item}を ${LABEL[to] ?? to}に わたした`);
+          return;
+        }
+        // 2体のランデブー：渡す側が相手の机まで歩いて行って手渡す（A2Aの可視化）
+        let releaseMeet!: () => void;
+        const met = new Promise<void>((r) => (releaseMeet = r));
+        let releaseTalk!: () => void;
+        const talked = new Promise<void>((r) => (releaseTalk = r));
+        this.pushAction(from, async () => {
+          try {
+            this.stopWork(fromA);
+            this.setStatus(from, "かんりょう", STATUS_COLOR.done);
+            const side = fromA.stand.c < toA.stand.c ? -1 : 1;
+            let meet: Tile = { c: toA.stand.c + side, r: STAND_ROW };
+            if (!this.grid[meet.r]?.[meet.c]) meet = { c: toA.stand.c - side, r: STAND_ROW };
+            await this.walkTo(fromA, meet);
+            this.faceToward(fromA, toA.sprite.x);
+            this.setEmote(fromA, "talk");
+            this.addMessage(`${LABEL[from] ?? from}「${item}が できたぞ！」`);
+            releaseMeet();
+            await this.sleep(1100);
             this.addMessage(`${LABEL[to] ?? to}「まかせろ！」── ${item}を うけとった`);
-            this.setBubble(from, "");
-            this.setBubble(to, "！");
-            this.setStatus(to, "しごとちゅう", "#fbbf24");
-            this.startedAt.set(to, this.time.now);
-            const fromHome = this.homes.get(from);
-            if (fromHome) this.moveChar(from, fromHome.x, fromHome.y);
-            this.time.delayedCall(350, () => {
-              this.centered = to;
-              this.moveChar(to, STAGE.x, STAGE.y, () => {
-                this.setBubble(to, "…");
-                this.finish(250);
-              });
-            });
-          });
+            this.setEmote(fromA, null);
+            this.sparkle((fromA.sprite.x + toA.sprite.x) / 2, fromA.sprite.y - 30, 0xfbbf24, 7);
+            releaseTalk();
+            await this.sleep(250);
+            await this.walkTo(fromA, fromA.stand);
+            this.face(fromA, "down");
+          } finally {
+            releaseMeet();
+            releaseTalk();
+          }
+        });
+        return this.pushAction(to, async () => {
+          await met;
+          this.faceToward(toA, fromA.sprite.x);
+          await talked;
+          this.setEmote(toA, "alert");
+          await this.sleep(400);
+          this.setEmote(toA, null);
         });
       }
-      case "security_start":
-        if (!this.chars.has("security_reviewer")) return this.finish(0);
-        this.setStatus("security_reviewer", "かんさちゅう", "#fb7185");
-        this.addMessage("セキュリティかんさ かいし！");
-        return this.walkToCenter("security_reviewer", () => {
-          this.setBubble("security_reviewer", "…");
-          this.finish(300);
+      case "security_start": {
+        if (!this.actors.has("security_reviewer")) return;
+        return this.pushAction("security_reviewer", async () => {
+          const a = this.actors.get("security_reviewer");
+          if (!a) return;
+          this.setStatus("security_reviewer", "かんさちゅう", STATUS_COLOR.audit);
+          this.addMessage("セキュリティかんさ かいし！ せいかぶつを けんぶんする…");
+          await this.walkTo(a, INSPECT);
+          this.faceToward(a, this.tableCenter().x);
+          this.setEmote(a, "think");
+          this.startedAt.set("security_reviewer", this.time.now);
         });
+      }
       case "security_result": {
         const passed = String(d.passed) === "true";
         const findings = (d.findings as { severity: string }[]) ?? [];
         const criticals = findings.filter((f) => f.severity === "critical").length;
-        if (passed) {
-          this.addMessage(`かんさ クリア！ ${String(d.summary ?? "もんだいなし")}`);
-          this.setStatus("security_reviewer", "かんりょう", "#34d399");
-        } else {
-          this.cameras.main.flash(400, 220, 38, 38);
-          this.cameras.main.shake(300, 0.004);
-          this.addMessage(`このコードに ぜいじゃくせいあり！（critical ${criticals}件）`);
-          this.setStatus("security_reviewer", "ようちゅうい", "#f87171");
+        if (!this.actors.has("security_reviewer")) {
+          this.addMessage(passed ? "セキュリティかんさ クリア" : "ぜいじゃくせいあり！");
+          return;
         }
-        return this.time.delayedCall(600, () =>
-          this.walkHome("security_reviewer", () => this.finish(200)),
-        );
+        return this.pushAction("security_reviewer", async () => {
+          const a = this.actors.get("security_reviewer");
+          if (!a) return;
+          const started = this.startedAt.get("security_reviewer") ?? 0;
+          await this.sleep(Math.max(0, 1200 - (this.time.now - started)));
+          this.setEmote(a, null);
+          if (passed) {
+            this.addMessage(`かんさ クリア！ ${String(d.summary ?? "もんだいなし")}`);
+            this.setStatus("security_reviewer", "かんりょう", STATUS_COLOR.done);
+            this.sparkle(this.tableCenter().x, this.tableCenter().y, 0x34d399, 8);
+          } else {
+            this.cameras.main.flash(400, 220, 38, 38);
+            this.cameras.main.shake(300, 0.004);
+            this.setEmote(a, "alert");
+            this.addMessage(`このコードに ぜいじゃくせいあり！（critical ${criticals}件）`);
+            this.setStatus("security_reviewer", "ようちゅうい", STATUS_COLOR.danger);
+          }
+          await this.sleep(700);
+          if (a.emoteKind === "alert") this.setEmote(a, null);
+          await this.walkTo(a, a.stand);
+          this.face(a, "down");
+        });
       }
-      case "verify_start":
+      case "verify_start": {
         this.addMessage(
           String(d.mode) === "page"
             ? "ページが ちゃんと できているか しらべている…"
             : "サンドボックスで コードを ためしている…",
         );
-        return this.finish(700);
+        this.magicCircle();
+        return;
+      }
       case "verify_result": {
         const passed = String(d.passed) === "true";
         const isPage = String(d.mode) === "page";
         if (passed) {
           this.cameras.main.flash(300, 52, 211, 153);
+          this.sparkle(this.tableCenter().x, this.tableCenter().y, 0x34d399, 10);
           this.addMessage(
             isPage
               ? "けんしょう クリア！ ページは ちゃんと できている"
@@ -712,40 +871,221 @@ class HiveRpgScene extends Phaser.Scene {
               : "けんしょう しっぱい… テストが とおらない",
           );
         }
-        return this.finish(900);
+        return;
       }
-      case "retry":
+      case "retry": {
         this.addMessage(`もういちど ちょうせん！（${String(d.attempt)}/${String(d.max)}）`);
-        return this.finish(800);
+        const reason = String(d.reason ?? "");
+        if (reason) this.addMessage(`りゆう：${reason.slice(0, 34)}`);
+        return;
+      }
       case "escalation": {
-        const target = this.chars.has(agent) ? agent : "implementer";
-        this.cameras.main.flash(500, 255, 255, 255);
-        this.addMessage("しょうかんかいじょ！");
-        const char = this.chars.get(target);
-        return this.time.delayedCall(600, () => {
-          if (this.textures.exists(`${target}_pro`)) char?.setTexture(`${target}_pro`);
+        const target = this.actors.has(agent) ? agent : "implementer";
+        if (!this.actors.has(target)) {
+          this.addMessage("しょうかんかいじょ！ 上位モデルに こうたいした");
+          return;
+        }
+        return this.pushAction(target, async () => {
+          const a = this.actors.get(target);
+          if (!a) return;
+          this.cameras.main.flash(500, 255, 255, 255);
+          this.addMessage("しょうかんかいじょ！");
+          await this.sleep(500);
+          a.pro = true;
+          this.setFrame(a, 0);
+          this.sparkle(a.sprite.x, a.sprite.y - 26, 0xfde68a, 12);
+          this.setStatus(target, "パワーアップ", STATUS_COLOR.power);
           this.addMessage(
             `あたらしい${LABEL[target] ?? target}（上位モデル）が なかまに くわわった！`,
           );
-          this.setStatus(target, "パワーアップ", "#c084fc");
-          this.finish(900);
+          await this.sleep(500);
         });
       }
-      case "memory_write":
-        this.addMessage(`ぼうけんのしょに きろくした：${String(d.title ?? "").slice(0, 30)}`);
-        return this.finish(800);
+      case "memory_write": {
+        this.glowShelf(0x60a5fa);
+        return this.addMessage(
+          `ぼうけんのしょに きろくした：${String(d.title ?? "").slice(0, 30)}`,
+        );
+      }
       case "done": {
         this.addMessage("クエスト かんりょう！ せいかぶつを のうひんした");
-        this.chars.forEach((img) => {
-          this.tweens.add({ targets: img, y: img.y - 14, duration: 160, yoyo: true, repeat: 2 });
+        const spots: Tile[] = [
+          { c: 7, r: 5 },
+          { c: 8, r: 5 },
+          { c: 6, r: 4 },
+          { c: 9, r: 4 },
+          { c: 6, r: 5 },
+          { c: 9, r: 5 },
+        ];
+        let i = 0;
+        this.actors.forEach((a, key) => {
+          const spot = spots[i % spots.length];
+          i += 1;
+          this.pushAction(key, async () => {
+            this.stopWork(a);
+            this.setEmote(a, null);
+            await this.walkTo(a, spot);
+            this.face(a, "down");
+            await this.tweenP({
+              targets: a.sprite,
+              y: a.sprite.y - 16,
+              duration: 150,
+              yoyo: true,
+              repeat: 2,
+              onUpdate: () => this.follow(a),
+            });
+            this.follow(a);
+          });
         });
-        return this.finish(500);
+        this.time.delayedCall(1300, () => this.confetti());
+        return;
       }
-      case "error":
+      case "error": {
+        this.cameras.main.shake(250, 0.003);
         this.addMessage(`エラーが おきた：${String(d.message ?? "").slice(0, 40)}`);
-        return this.finish(500);
+        this.actors.forEach((a, key) => {
+          this.pushAction(key, async () => {
+            this.stopWork(a);
+            this.setEmote(a, "alert");
+            await this.sleep(900);
+            this.setEmote(a, null);
+          });
+        });
+        return;
+      }
       default:
-        return this.finish(0);
+        return;
+    }
+  }
+
+  // --- リプレイ（瞬間復元） -----------------------------------------------------
+
+  private pushInstantMessage(text: string) {
+    this.messages = [...this.messages, `＊ ${text}`].slice(-3);
+  }
+
+  /** 1イベントをアニメーションなしで適用する（dispatch() の瞬間版）。 */
+  private applyInstant(e: HiveEvent) {
+    const d = e.data;
+    const agent = String(d.agent ?? "");
+    const placeAtStand = (key: string) => {
+      const a = this.actors.get(key);
+      if (!a) return;
+      const { x, y } = tileXY(a.stand);
+      a.sprite.setPosition(x, y);
+      a.tile = { ...a.stand };
+      this.face(a, "down");
+      this.follow(a);
+    };
+    switch (e.type) {
+      case "task_received":
+        return this.pushInstantMessage(`クエスト：${String(d.task ?? "").slice(0, 40)}`);
+      case "router": {
+        const party = (d.party as { agent: string; role: string }[]) ?? [];
+        if (party.length > 0) this.spawnParty(party, true);
+        const names = party.map((p) => LABEL[p.agent] ?? p.agent).join("・");
+        const rank = String(d.rank ?? "?");
+        const sakusen = String(d.sakusen ?? d.quality ?? "");
+        this.pushInstantMessage(
+          `討伐ランク ${rank}${sakusen ? "／さくせん：" + sakusen : ""}${names ? "／なかま：" + names : ""}`,
+        );
+        return;
+      }
+      case "memory_recall": {
+        const lessons = (d.lessons as string[]) ?? [];
+        return this.pushInstantMessage(
+          `むかしの きおくを おもいだした：${(lessons[0] ?? "").slice(0, 30)}`,
+        );
+      }
+      case "agent_start": {
+        const a = this.actors.get(agent);
+        if (!a) return;
+        placeAtStand(agent);
+        this.setStatus(agent, "しごとちゅう", STATUS_COLOR.work);
+        // 復元直後にライブの完了が届いても余計に待たせない
+        this.startedAt.set(agent, this.time.now - MIN_WORK_MS);
+        this.startWork(a);
+        return this.pushInstantMessage(`${LABEL[agent] ?? agent}は はたらいている…`);
+      }
+      case "agent_output": {
+        const a = this.actors.get(agent);
+        if (!a) return;
+        this.stopWork(a);
+        this.setStatus(agent, "かんりょう", STATUS_COLOR.done);
+        return this.pushInstantMessage(`${LABEL[agent] ?? agent}の しごとが おわった`);
+      }
+      case "handoff": {
+        const from = String(d.from_agent ?? "");
+        const to = String(d.to_agent ?? "");
+        const item = String(d.item ?? "せいかぶつ");
+        const detail = String(d.detail ?? "");
+        if (detail) this.pendingDetail.set(to, detail);
+        this.pushInstantMessage(`${LABEL[from] ?? from}が ${item}を ${LABEL[to] ?? to}に わたした`);
+        const fromA = this.actors.get(from);
+        if (fromA) {
+          this.stopWork(fromA);
+          this.setStatus(from, "かんりょう", STATUS_COLOR.done);
+        }
+        const toA = this.actors.get(to);
+        if (toA) {
+          this.setStatus(to, "しごとちゅう", STATUS_COLOR.work);
+          this.startedAt.set(to, this.time.now - MIN_WORK_MS);
+          this.startWork(toA);
+        }
+        return;
+      }
+      case "security_start": {
+        const a = this.actors.get("security_reviewer");
+        if (!a) return;
+        this.setStatus("security_reviewer", "かんさちゅう", STATUS_COLOR.audit);
+        const { x, y } = tileXY(INSPECT);
+        a.sprite.setPosition(x, y);
+        a.tile = { ...INSPECT };
+        this.faceToward(a, this.tableCenter().x);
+        this.follow(a);
+        return;
+      }
+      case "security_result": {
+        const passed = String(d.passed) === "true";
+        this.pushInstantMessage(passed ? "セキュリティかんさ クリア" : "ぜいじゃくせいあり！");
+        if (this.actors.has("security_reviewer")) {
+          this.setStatus(
+            "security_reviewer",
+            passed ? "かんりょう" : "ようちゅうい",
+            passed ? STATUS_COLOR.done : STATUS_COLOR.danger,
+          );
+          placeAtStand("security_reviewer");
+        }
+        return;
+      }
+      case "verify_result": {
+        const passed = String(d.passed) === "true";
+        return this.pushInstantMessage(passed ? "けんしょう クリア！" : "けんしょう しっぱい…");
+      }
+      case "retry":
+        return this.pushInstantMessage(
+          `もういちど ちょうせん！（${String(d.attempt)}/${String(d.max)}）`,
+        );
+      case "escalation": {
+        const target = this.actors.has(agent) ? agent : "implementer";
+        const a = this.actors.get(target);
+        if (a) {
+          a.pro = true;
+          this.setFrame(a, 0);
+          this.setStatus(target, "パワーアップ", STATUS_COLOR.power);
+        }
+        return this.pushInstantMessage("しょうかんかいじょ！ 上位モデルに こうたいした");
+      }
+      case "memory_write":
+        return this.pushInstantMessage(
+          `ぼうけんのしょに きろくした：${String(d.title ?? "").slice(0, 30)}`,
+        );
+      case "done":
+        return this.pushInstantMessage("クエスト かんりょう！ せいかぶつを のうひんした");
+      case "error":
+        return this.pushInstantMessage(`エラーが おきた：${String(d.message ?? "").slice(0, 40)}`);
+      default:
+        return;
     }
   }
 }
@@ -758,7 +1098,8 @@ export function createGame(parent: HTMLElement): HiveGame {
     width: W,
     height: H,
     pixelArt: true,
-    backgroundColor: "#0a0f0a",
+    roundPixels: true,
+    backgroundColor: "#100d16",
     scale: {
       mode: Phaser.Scale.FIT,
       autoCenter: Phaser.Scale.CENTER_HORIZONTALLY,

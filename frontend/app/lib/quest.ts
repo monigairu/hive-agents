@@ -27,6 +27,7 @@ const HISTORY_LIMIT = 10;
 // サーバが流すSSEイベント名（描画はすべて購読側のマッピングで行う）
 const EVENT_NAMES = [
   "task_received",
+  "armor",
   "router",
   "intake_start",
   "order_spec",
