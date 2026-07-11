@@ -32,6 +32,18 @@ AGENTS=(designer implementer tester)
 OUTDIR=.run/identity
 mkdir -p "$OUTDIR"
 
+# SA作成直後はIAMへの反映に数十秒かかることがある（GCPの結果整合性）。
+# 「does not exist」等で失敗したら10秒待って再試行する（最大6回＝約1分）
+retry() {
+  local n
+  for n in 1 2 3 4 5 6; do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    echo "   （IAM反映待ち ${n}/6 …10秒後に再試行）"
+    sleep 10
+  done
+  "$@"  # 最終試行はエラーを表示して失敗させる
+}
+
 for name in "${AGENTS[@]}"; do
   sa="hive-${name}"
   email="${sa}@${PROJECT}.iam.gserviceaccount.com"
@@ -47,17 +59,17 @@ for name in "${AGENTS[@]}"; do
   fi
 
   # 最小権限：Vertex AI（Gemini）の呼び出しだけ。ストレージもデプロイ権限も無し
-  gcloud projects add-iam-policy-binding "$PROJECT" \
+  retry gcloud projects add-iam-policy-binding "$PROJECT" \
     --member="serviceAccount:${email}" \
     --role="roles/aiplatform.user" \
-    --condition=None --quiet >/dev/null
+    --condition=None --quiet
   echo "   付与: roles/aiplatform.user（最小権限）"
 
   # 実行ユーザー → このSA への成り代わりを許可
-  gcloud iam service-accounts add-iam-policy-binding "$email" \
+  retry gcloud iam service-accounts add-iam-policy-binding "$email" \
     --project="$PROJECT" \
     --member="user:${ACCOUNT}" \
-    --role="roles/iam.serviceAccountTokenCreator" --quiet >/dev/null
+    --role="roles/iam.serviceAccountTokenCreator" --quiet
   echo "   付与: 成り代わり許可 (${ACCOUNT})"
 
   # 成り代わり用ADCを生成（source=人間のADC → target=AgentのSA）
