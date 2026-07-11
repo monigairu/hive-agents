@@ -18,7 +18,15 @@ AGENTS=("designer:8001" "implementer:8002" "tester:8003")
 start() {
   for entry in "${AGENTS[@]}"; do
     name="${entry%%:*}"; port="${entry##*:}"
-    nohup uv run uvicorn "agents.${name}.main:app" --host localhost --port "$port" \
+    # F-10 Agent Identity：成り代わりADCがあればAgent専用IDで動かす（無ければ従来通り人間のADC）
+    # 生成は ./scripts/setup_agent_identity.sh（1回だけ）
+    id_env=()
+    id_file="$PWD/$RUNDIR/identity/${name}.json"
+    if [ -f "$id_file" ]; then
+      id_env=("GOOGLE_APPLICATION_CREDENTIALS=${id_file}")
+      echo "identity: ${name} は専用SA（hive-${name}）で起動"
+    fi
+    nohup env "${id_env[@]}" uv run uvicorn "agents.${name}.main:app" --host localhost --port "$port" \
       > "$RUNDIR/${name}.log" 2>&1 &
     echo $! > "$RUNDIR/${name}.pid"
     echo "started ${name} on :${port} (pid $(cat "$RUNDIR/${name}.pid"))"

@@ -39,6 +39,7 @@ from agents.security_reviewer.agent import security_reviewer_agent
 from agents.tester.agent import tester_agent
 from agents.web.agent import make_web_implementer
 from agents.webapp.agent import make_webapp_implementer
+from shared.armor import armor_on, sanitize_prompt, sanitize_response
 from shared.memory import ReasoningBank, acceptable_lesson, render_memories
 from shared.models import FLASH, PRO, with_thinking
 from shared.layoutcheck import check_layout
@@ -431,6 +432,22 @@ def _effort_plan(effort: str, task_type: str, scale: str, rank: str = "") -> dic
 async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
     """発注→（実装→検証→失敗なら修正）ループ→記録、を SSE で逐次配信する（F-04）。"""
     yield _sse("task_received", task=task)
+
+    # 実行時入力防御（F-11 Model Armor）：発注文がモデルに届く前に検査する。
+    # プロンプトインジェクション等を検出したら実行そのものを止める（F-15とは別レイヤー）。
+    # API未整備の環境では checked=False で素通し（フェイルオープン・intakeと同じ思想）
+    if armor_on():
+        gate = await asyncio.to_thread(sanitize_prompt, task)
+        if gate.checked or not gate.allowed:
+            yield _sse("armor", stage="prompt", **gate.model_dump())
+        if not gate.allowed:
+            yield _sse(
+                "error",
+                message="発注文が実行時安全フィルタ（Model Armor）にブロックされました："
+                + "・".join(gate.matched),
+            )
+            return
+
     decision = classify(task)
     task_type = decision["task_type"]
 
@@ -742,6 +759,16 @@ async def _run_stream(task: str, effort: str = "auto") -> AsyncIterator[dict]:
                         distilled=True,
                         forgotten=_bank.forget(),
                     )
+        # 出力保護（F-11 Model Armor）：納品物に機密データ（PII・APIキー等）が
+        # 混ざっていないか最終検査する。報告のみ＝納品は止めず、判断はUIに開示する
+        if armor_on():
+            deliverable = "\n".join(
+                outputs.get(a) or "" for a in ("implementer", "frontend")
+            ).strip()
+            if deliverable:
+                seal = await asyncio.to_thread(sanitize_response, deliverable)
+                if seal.checked:
+                    yield _sse("armor", stage="response", **seal.model_dump())
         yield _sse("done")
     except TimeoutError:
         # 見張り（guard_silence）の発報：固まったまま待たせず、明示的に知らせる（F-03）
