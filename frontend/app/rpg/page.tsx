@@ -99,16 +99,30 @@ export default function RpgPage() {
   useEffect(() => {
     let cancelled = false;
     let unsubscribe: (() => void) | undefined;
+    let stopDemo: (() => void) | undefined;
     (async () => {
-      // ドット日本語フォントの読み込みを待ってからキャンバスを作る（文字化け防止）
+      // ドット日本語フォントの読み込みを待ってからキャンバスを作る（文字化け防止）。
+      // Google FontsのCJKは文字範囲ごとの分割配信で、canvas描画はサブセットの
+      // 自動読み込みを起こさないため、固定UI（ステータス窓等）で使う文字を
+      // 明示的に指定して必要なサブセットまで先に読み込む
       try {
-        await document.fonts.load('16px "DotGothic16"');
+        await document.fonts.load(
+          '16px "DotGothic16"',
+          "設計担当実装画面テスト監査セキュリティ討伐ランク依頼書上位モデル" +
+            "じょうたいまちしごとちゅうかんりょうさようパワーアップ",
+        );
       } catch {
         /* フォントが取れなくてもフォールバックで描画する */
       }
       const { createGame } = await import("./game");
       if (cancelled || !containerRef.current || gameRef.current) return;
       gameRef.current = createGame(containerRef.current);
+      // デモモード（F-14）：バックエンドなしで演出一式を通しで再生する
+      if (new URLSearchParams(window.location.search).has("demo")) {
+        const { runDemo } = await import("./demo");
+        stopDemo = runDemo(gameRef.current);
+        return;
+      }
       restore();
       unsubscribe = quest.subscribe((e) => {
         if (e.type === "__reset") return restore();
@@ -126,6 +140,7 @@ export default function RpgPage() {
     return () => {
       cancelled = true;
       unsubscribe?.();
+      stopDemo?.();
       gameRef.current?.destroy();
       gameRef.current = null;
     };
@@ -180,7 +195,7 @@ export default function RpgPage() {
           0.5秒ごとに数pxずつ下がり続けるバグになる（実測で確認済み） */}
       <div
         ref={containerRef}
-        className="aspect-[38/27] max-h-[560px] w-full overflow-hidden rounded-xl border border-neutral-800 bg-black"
+        className="aspect-[16/11] max-h-[560px] w-full overflow-hidden rounded-xl border border-neutral-800 bg-black"
       />
 
       {artifact && (
