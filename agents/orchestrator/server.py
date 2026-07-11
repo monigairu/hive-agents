@@ -162,6 +162,13 @@ MAX_ATTEMPTS = int(os.environ.get("HIVE_MAX_ATTEMPTS", "3"))
 # F-03 安定化：LLM/A2A呼び出しの沈黙タイムアウト（秒）。イベントがこの秒数
 # 途絶えたら、固まったまま待ち続けずに明示的に失敗させてUIに知らせる。"0"で無効
 _AGENT_TIMEOUT = float(os.environ.get("HIVE_AGENT_TIMEOUT", "300"))
+# F-03 安定化：機械検証（ブラウザ実行・uvサンドボックス）の同時実行数の上限。
+# 検証1件ごとに重いサブプロセスが立つため、多人数が同時発注するとCPUを取り合い
+# タイムアウトが多発する。ここで一度に走る検証を絞り、超過分は順番待ちにする
+# （待つだけで失敗にはしない）。本番はCloud Runの水平スケールと併用。"0"以下で無効。
+_MAX_CONCURRENT_VERIFY = int(os.environ.get("HIVE_MAX_CONCURRENT_VERIFY", "3"))
+# Semaphore はイベントループ生成前でも作れる（Python 3.10+）。0以下なら見張らない
+_VERIFY_SLOTS = asyncio.Semaphore(_MAX_CONCURRENT_VERIFY) if _MAX_CONCURRENT_VERIFY > 0 else None
 # デモ/テスト用：最初の N 回の検証を強制的に失敗扱いにし、修正ループを観察できる。
 _DEMO_FAIL = int(os.environ.get("HIVE_DEMO_FAIL_ATTEMPTS", "0"))
 # F-15 セキュリティ監査： "1"=両層（既定）/ "pattern"=第1層のみ（$0）/ "0"=無効
@@ -233,6 +240,21 @@ async def _verify_artifact(
     task_type: str, outputs: dict[str, str], attempt: int
 ) -> VerificationResult:
     """成果物1回ぶんの機械検証を実行し、結果だけ返す（F-04）。
+
+    同時実行の絞り（_VERIFY_SLOTS）だけをここで担う薄いラッパ。検証の中身は
+    _run_verify にある。スロットが空くまで待ってから走る＝多人数の同時発注でも
+    重いサブプロセス（ブラウザ・uv）が一斉に立たない（待つだけ・失敗にはしない）。
+    """
+    if _VERIFY_SLOTS is None:
+        return await _run_verify(task_type, outputs, attempt)
+    async with _VERIFY_SLOTS:
+        return await _run_verify(task_type, outputs, attempt)
+
+
+async def _run_verify(
+    task_type: str, outputs: dict[str, str], attempt: int
+) -> VerificationResult:
+    """機械検証の中身（F-04）。
 
     - app: 出荷基準の多段オラクル（構造チェック→ブラウザ実行→受け入れ検証→
       スマホ表示のvision判定※レポートのみ・合否は変えない）
