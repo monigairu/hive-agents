@@ -1,0 +1,5 @@
+# frontend の gcloud run deploy --source . 用（ビルドはCloud Build側で行う）
+.gcloudignore
+node_modules/
+.next/
+tsconfig.tsbuildinfo

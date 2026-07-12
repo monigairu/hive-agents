@@ -1,0 +1,21 @@
+# gcloud run deploy --source . のアップロード除外（Dockerビルドに不要なもの）
+.git
+.gitignore
+.gcloudignore
+.venv
+.env
+.env.example
+.run
+.hive
+__pycache__/
+*.pyc
+node_modules/
+frontend/
+docs/
+evals/
+tests/
+scripts/
+*.mov
+*.png
+memo.txt
+REQUIREMENTS.md.tmp*

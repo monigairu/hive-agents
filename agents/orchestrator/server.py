@@ -31,6 +31,7 @@ from starlette.routing import Route
 
 from agents.app.agent import make_app_implementer, make_frontend
 from agents.implementer.agent import make_implementer
+from agents.orchestrator import quota
 from agents.orchestrator.intake import make_intake, parse_order, render_order
 from agents.orchestrator.router import classify, difficulty_rank, rank_reasons, thinking_level
 from agents.orchestrator.workflow import build_workflow
@@ -796,6 +797,18 @@ def _remember_security(task_type: str, report: SecurityReport) -> dict:
     return {"kind": item.kind, "title": item.title, "forgotten": _bank.forget()}
 
 
+async def _reject_stream(message: str):
+    """接続は200で受けてエラーイベントだけ流す（EventSourceは非200の本文を読めない）。"""
+    yield _sse("error", message=message)
+
+
+async def _with_quota(verdict: quota.Verdict, inner):
+    """本編の前に残り回数を1イベントだけ通知する（UIの「のこり回数」表示用）。"""
+    yield _sse("quota", remaining=verdict.remaining, limit=verdict.limit)
+    async for event in inner:
+        yield event
+
+
 async def stream(request: Request) -> EventSourceResponse:
     task = request.query_params.get("task") or DEFAULT_TASK
     # effort（さくせん）が正。旧パラメータ quality も互換で受ける
@@ -804,6 +817,20 @@ async def stream(request: Request) -> EventSourceResponse:
         or request.query_params.get("quality")
         or "auto"
     )
+    # 公開デプロイ時の認証＋週間制限（HIVE_OAUTH_CLIENT_ID がある時だけ有効）。
+    # トークンはヘッダで受ける（URLに載せるとアクセスログに残ってしまうため）
+    if quota.auth_enabled():
+        auth_header = request.headers.get("authorization", "")
+        token = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
+        user = await asyncio.to_thread(quota.verify_token, token)
+        if user is None:
+            return EventSourceResponse(
+                _reject_stream("発注にはGoogleログインが必要です（画面右上からログイン）")
+            )
+        verdict = await asyncio.to_thread(quota.consume, user)
+        if not verdict.allowed:
+            return EventSourceResponse(_reject_stream(verdict.message))
+        return EventSourceResponse(_with_quota(verdict, _run_stream(task, effort)))
     return EventSourceResponse(_run_stream(task, effort))
 
 
