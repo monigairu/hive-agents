@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { AuthChip } from "./components/AuthChip";
+import { AuthGate } from "./components/AuthGate";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -13,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Hive — 自然言語で発注する開発チーム",
+  title: "HIVE QUEST — 自然言語で発注する開発チーム",
   description: "ADK 2.x マルチエージェントの協働を可視化する",
 };
 
@@ -37,7 +39,13 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {/* ログインしてからアプリに入る：未ログイン時はタイトル画面だけを表示 */}
+        <AuthGate>
+          <AuthChip />
+          {children}
+        </AuthGate>
+      </body>
     </html>
   );
 }

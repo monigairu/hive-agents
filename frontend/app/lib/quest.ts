@@ -10,6 +10,8 @@
  * - 履歴は localStorage に保存し、サイドバーから再表示・削除できる
  */
 
+import * as auth from "./auth";
+
 export type HiveEventMsg = { type: string; data: Record<string, unknown> };
 
 export type QuestRecord = {
@@ -26,6 +28,7 @@ const HISTORY_LIMIT = 10;
 
 // サーバが流すSSEイベント名（描画はすべて購読側のマッピングで行う）
 const EVENT_NAMES = [
+  "quota",
   "task_received",
   "armor",
   "router",
@@ -49,7 +52,7 @@ const EVENT_NAMES = [
 export type QuestListener = (e: HiveEventMsg) => void;
 
 let current: QuestRecord | null = null;
-let es: EventSource | null = null;
+let abort: AbortController | null = null;
 const listeners = new Set<QuestListener>();
 
 function notify(e: HiveEventMsg) {
@@ -78,7 +81,7 @@ export function isRunning(): boolean {
 
 export function start(task: string, effort: string = "auto") {
   if (isRunning() || !task.trim()) return;
-  es?.close();
+  abort?.abort();
   current = {
     id: crypto.randomUUID(),
     task,
@@ -88,10 +91,6 @@ export function start(task: string, effort: string = "auto") {
   };
   notify({ type: "__reset", data: {} });
 
-  const src = new EventSource(
-    `${API}/stream?task=${encodeURIComponent(task)}&effort=${encodeURIComponent(effort)}`,
-  );
-  es = src;
   const push = (type: string, data: Record<string, unknown>) => {
     if (!current) return;
     current.events.push({ type, data });
@@ -99,24 +98,97 @@ export function start(task: string, effort: string = "auto") {
     // （購読側で何が起きても履歴が確実に残るように）
     if (type === "done") {
       finish("done");
-      src.close(); // SSEの自動再接続を止める（重要）
+      abort?.abort(); // 接続を確実に閉じる
     } else if (type === "error") {
       finish("error");
-      src.close();
+      abort?.abort();
     }
     notify({ type, data });
   };
-  for (const name of EVENT_NAMES) {
-    src.addEventListener(name, (e) => {
-      const raw = (e as MessageEvent).data;
-      push(name, raw ? JSON.parse(raw) : {});
-    });
+
+  // 本番（要ログイン設定）では IDトークンを Authorization ヘッダで添えて発注する。
+  // URL（クエリ）に載せるとサーバのアクセスログに残るため、ヘッダで送る。
+  const headers: Record<string, string> = {};
+  if (auth.authRequired()) {
+    const token = auth.getToken();
+    if (!token) {
+      push("error", { message: "発注にはGoogleログインが必要です（画面右上からログイン）" });
+      return;
+    }
+    headers.Authorization = `Bearer ${token}`;
   }
-  src.addEventListener("error", (e) => {
-    const message =
-      e instanceof MessageEvent && e.data ? JSON.parse(e.data).message : "接続が切れました";
-    push("error", { message });
+
+  const ac = new AbortController();
+  abort = ac;
+  const url = `${API}/stream?task=${encodeURIComponent(task)}&effort=${encodeURIComponent(effort)}`;
+  streamSse(url, headers, ac, push).catch((err) => {
+    if (ac.signal.aborted) return; // 自分で閉じた場合はエラー扱いしない
+    push("error", { message: err instanceof Error ? err.message : "接続が切れました" });
   });
+}
+
+/**
+ * fetch ベースのSSE購読。
+ * EventSource ではなく fetch を使うのは Authorization ヘッダを付けるため。
+ * （EventSource はヘッダ不可・自動再接続の副作用もあるので、ここで自前パースする）
+ */
+async function streamSse(
+  url: string,
+  headers: Record<string, string>,
+  ac: AbortController,
+  push: (type: string, data: Record<string, unknown>) => void,
+) {
+  const res = await fetch(url, { headers, signal: ac.signal });
+  if (!res.ok || !res.body) {
+    throw new Error(`サーバに接続できませんでした（HTTP ${res.status}）`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  const known = new Set(EVENT_NAMES);
+  let ended = false;
+
+  const dispatch = (block: string) => {
+    // SSEの1イベント（event: / data: 行の集まり。":"始まりはping用コメント）
+    let event = "message";
+    const dataLines: string[] = [];
+    for (const line of block.split(/\r\n|\n|\r/)) {
+      if (line.startsWith(":")) continue;
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    }
+    const raw = dataLines.join("\n");
+    let data: Record<string, unknown> = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      /* JSONでないdataは無視（空オブジェクトで流す） */
+    }
+    if (event === "error") {
+      ended = true;
+      push("error", { message: (data.message as string) ?? "接続が切れました" });
+    } else if (known.has(event)) {
+      if (event === "done") ended = true;
+      push(event, data);
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    // イベント区切り（空行）ごとに処理する
+    for (;;) {
+      const m = buf.match(/\r\n\r\n|\n\n|\r\r/);
+      if (!m || m.index === undefined) break;
+      const block = buf.slice(0, m.index);
+      buf = buf.slice(m.index + m[0].length);
+      if (block.trim()) dispatch(block);
+      if (ended) return;
+    }
+  }
+  // done/error を受け取らないまま接続が終わった＝異常切断
+  if (!ended) push("error", { message: "接続が切れました" });
 }
 
 function finish(status: "done" | "error") {
@@ -150,7 +222,7 @@ export function load(id: string) {
   if (isRunning()) return;
   const rec = history().find((r) => r.id === id);
   if (!rec) return;
-  es?.close();
+  abort?.abort();
   current = rec;
   notify({ type: "__reset", data: {} });
 }

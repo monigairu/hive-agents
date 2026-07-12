@@ -132,6 +132,8 @@ class HiveRpgScene extends Phaser.Scene {
   private typingLine = "";
   private msgQueue: string[] = [];
   private typing = false;
+  /** replayでの全消去時に走行中のタイプライターを打ち切るための世代番号 */
+  private msgGen = 0;
   private messageText!: Phaser.GameObjects.Text;
   private cursor!: Phaser.GameObjects.Text;
 
@@ -164,6 +166,7 @@ class HiveRpgScene extends Phaser.Scene {
     }
     this.clearParty();
     this.msgQueue = [];
+    this.msgGen++;
     this.typing = false;
     this.typingLine = "";
     this.messages = [];
@@ -647,6 +650,9 @@ class HiveRpgScene extends Phaser.Scene {
   private async pumpMessages() {
     if (this.typing) return;
     this.typing = true;
+    // replayが窓を全消去したら世代が進む。古い世代のループは何も触らず即終了する
+    // （放置すると新旧2本のループが1文字ずつ交互に書いて「ククエエスストト」になる）
+    const gen = this.msgGen;
     while (this.msgQueue.length > 0 && !this.destroyed) {
       const line = `＊ ${this.msgQueue.shift()}`;
       // イベントが溜まっているときは文字送りをやめて追いつく（実況を遅延させない）
@@ -659,10 +665,12 @@ class HiveRpgScene extends Phaser.Scene {
         this.typingLine += ch;
         this.renderMessages();
         await this.sleep(20);
+        if (gen !== this.msgGen) return;
         if (this.msgQueue.length >= 2) break;
       }
       this.commitLine(line);
       await this.sleep(140);
+      if (gen !== this.msgGen) return;
     }
     this.typing = false;
   }
