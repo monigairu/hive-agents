@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AuthChip } from "./components/AuthChip";
@@ -17,6 +17,17 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "HIVE QUEST — 自然言語で発注する開発チーム",
   description: "ADK 2.x マルチエージェントの協働を可視化する",
+};
+
+// スマホ最適化：ノッチ端末で全幅に描画し、ブラウザUIの色をアプリに合わせる
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
+    { color: "#ffffff" },
+  ],
 };
 
 export default function RootLayout({

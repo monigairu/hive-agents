@@ -19,8 +19,16 @@
   }
 }
 
+html {
+  /* iOSが横向き時などに文字を勝手に拡大するのを防ぐ */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+  /* タップ時の灰色フラッシュを消す（ボタンの見た目は自前のhover/activeで出す） */
+  -webkit-tap-highlight-color: transparent;
 }

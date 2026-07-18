@@ -39,10 +39,12 @@ export function SakusenSelect({
   value,
   onChange,
   disabled,
+  className = "",
 }: {
   value: string;
   onChange: (v: string) => void;
   disabled?: boolean;
+  className?: string;
 }) {
   const hint = SAKUSEN_OPTIONS.find((o) => o.value === value)?.hint ?? "";
   return (
@@ -51,7 +53,7 @@ export function SakusenSelect({
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
       title={`さくせん：${hint}`}
-      className="rounded-lg border border-neutral-300 px-2 py-2 text-sm outline-none focus:border-amber-400 dark:border-neutral-700 dark:bg-neutral-900"
+      className={`rounded-lg border border-neutral-300 px-2 py-2 text-sm outline-none focus:border-amber-400 dark:border-neutral-700 dark:bg-neutral-900 ${className}`}
     >
       {SAKUSEN_OPTIONS.map((o) => (
         <option key={o.value} value={o.value}>
