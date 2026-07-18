@@ -47,6 +47,9 @@ export type HiveGame = {
   /** 過去イベントを瞬間適用して途中状態を復元する（ページ遷移からの復帰用） */
   replay: (events: HiveEvent[]) => void;
   destroy: () => void;
+  /** 実況メッセージ（確定行）の変化を通知する。スマホではキャンバス内の文字が
+      縮小されて読めないため、HTML側に同じ実況を映すのに使う */
+  setOnMessages: (cb: ((lines: string[]) => void) | null) => void;
 };
 
 // 既知のAgentの表示名カタログ。実際の編成（パーティ）は router イベントが運んでくる
@@ -136,6 +139,8 @@ class HiveRpgScene extends Phaser.Scene {
   private msgGen = 0;
   private messageText!: Phaser.GameObjects.Text;
   private cursor!: Phaser.GameObjects.Text;
+  onMessages: ((lines: string[]) => void) | null = null;
+  private lastEmitted = "";
 
   /** handoff で受け取った「次は何をするか」をagent_startの台詞に使う */
   private pendingDetail = new Map<string, string>();
@@ -645,6 +650,12 @@ class HiveRpgScene extends Phaser.Scene {
       ? [...this.messages.slice(-2), this.typingLine]
       : this.messages;
     this.messageText?.setText(lines.join("\n"));
+    // タイプ中の1文字ごとではなく、確定行が変わったときだけHTML側へ通知する
+    const committed = this.messages.join("\n");
+    if (committed !== this.lastEmitted) {
+      this.lastEmitted = committed;
+      this.onMessages?.(this.messages);
+    }
   }
 
   private async pumpMessages() {
@@ -1148,5 +1159,8 @@ export function createGame(parent: HTMLElement): HiveGame {
     enqueue: (e) => scene.enqueue(e),
     replay: (events) => scene.replay(events),
     destroy: () => game.destroy(true),
+    setOnMessages: (cb) => {
+      scene.onMessages = cb;
+    },
   };
 }

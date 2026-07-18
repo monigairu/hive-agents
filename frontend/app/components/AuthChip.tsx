@@ -36,9 +36,11 @@ export function AuthChip() {
   if (!auth.authRequired() || !user) return null;
 
   return (
-    <div className="fixed right-3 top-3 z-50">
+    // スマホ：固定表示だとヘッダーに重なるため、フロー内の右寄せバーにする。
+    // デスクトップ：従来どおり右上に固定
+    <div className="flex justify-end px-3 pt-3 sm:fixed sm:right-3 sm:top-3 sm:z-50 sm:p-0">
       <div className="flex items-center gap-2 rounded-full border border-amber-900/40 bg-stone-900/90 px-3 py-1.5 text-xs text-amber-100 shadow">
-        <span>🪪 {user.name}</span>
+        <span className="max-w-[9rem] truncate">🪪 {user.name}</span>
         {remaining !== undefined && (
           <span className="text-amber-300">
             {remaining === null ? "のこり：∞" : `今週のこり ${remaining} 回`}
@@ -46,7 +48,7 @@ export function AuthChip() {
         )}
         <button
           onClick={() => auth.signOut()}
-          className="rounded border border-amber-900/40 px-1.5 py-0.5 text-amber-200/70 hover:text-amber-100"
+          className="rounded border border-amber-900/40 px-2 py-1 text-amber-200/70 hover:text-amber-100"
         >
           ログアウト
         </button>

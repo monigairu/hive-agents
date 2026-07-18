@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { HistorySidebar } from "./components/HistorySidebar";
-import { SakusenSelect } from "./components/SakusenSelect";
+import { QuestForm } from "./components/QuestForm";
 import * as quest from "./lib/quest";
 import type { HiveGame } from "./rpg/game";
 
@@ -70,6 +70,8 @@ export default function RpgPage() {
   const [effort, setEffort] = useState("auto");
   const [running, setRunning] = useState(false);
   const [artifact, setArtifact] = useState<Artifact | null>(null);
+  // スマホ用：キャンバス内の実況は縮小されて読めないため、HTMLにも同じ実況を映す
+  const [msgs, setMsgs] = useState<string[]>([]);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const gameRef = useRef<HiveGame | null>(null);
   const outputsRef = useRef<Record<string, string>>({});
@@ -117,6 +119,7 @@ export default function RpgPage() {
       const { createGame } = await import("./rpg/game");
       if (cancelled || !containerRef.current || gameRef.current) return;
       gameRef.current = createGame(containerRef.current);
+      gameRef.current.setOnMessages((lines) => setMsgs([...lines]));
       // デモモード（F-14）：バックエンドなしで演出一式を通しで再生する
       if (new URLSearchParams(window.location.search).has("demo")) {
         const { runDemo } = await import("./rpg/demo");
@@ -141,6 +144,7 @@ export default function RpgPage() {
       cancelled = true;
       unsubscribe?.();
       stopDemo?.();
+      gameRef.current?.setOnMessages(null);
       gameRef.current?.destroy();
       gameRef.current = null;
     };
@@ -153,51 +157,63 @@ export default function RpgPage() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-6xl gap-5 px-4 py-6">
+    <main className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-4 py-4 md:flex-row md:gap-5 md:py-6">
       <HistorySidebar />
-      <div className="flex min-h-screen min-w-0 flex-1 flex-col gap-4">
-      <header className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="text-3xl">🐝</span>
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">HIVE QUEST</h1>
-            <p className="text-sm text-neutral-500">
+      <div className="flex min-w-0 flex-1 flex-col gap-3 md:min-h-screen md:gap-4">
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="text-2xl sm:text-3xl">🐝</span>
+          <div className="min-w-0">
+            <h1 className="text-xl font-bold tracking-tight sm:text-2xl">HIVE QUEST</h1>
+            <p className="text-xs text-neutral-500 sm:text-sm">
               自然言語で発注すると、はたらきバチたち（AIエージェント）が設計→実装→テストを分担する
             </p>
           </div>
         </div>
-        <Link href="/timeline" className="shrink-0 text-sm text-amber-600 hover:underline">
+        <Link
+          href="/timeline"
+          className="shrink-0 rounded-full border border-amber-300 px-3 py-1.5 text-sm text-amber-700 transition hover:bg-amber-50 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-950/40"
+        >
           💬 チャット形式で見る
         </Link>
       </header>
 
-      <div className="flex gap-2">
-        <input
-          className="flex-1 rounded-lg border border-neutral-300 px-3 py-2 text-sm outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-200 dark:border-neutral-700 dark:bg-neutral-900"
-          value={task}
-          onChange={(e) => setTask(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && start()}
-          placeholder="クエストを発注しよう！（例: タスク管理のCRUD APIをFastAPIで作って）"
-          disabled={running}
-        />
-        <SakusenSelect value={effort} onChange={setEffort} disabled={running} />
-        <button
-          onClick={start}
-          disabled={running || !task.trim()}
-          className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-600 disabled:opacity-50"
-        >
-          {running ? "ぼうけん中…" : "クエスト発注"}
-        </button>
-      </div>
+      <QuestForm
+        task={task}
+        onTaskChange={setTask}
+        effort={effort}
+        onEffortChange={setEffort}
+        running={running}
+        onStart={start}
+        submitLabel="クエスト発注"
+        runningLabel="ぼうけん中…"
+      />
 
       {/* キャンバスの親は「幅から決まる固定アスペクト比の箱」にする（高さ指定が肝）。
           高さをキャンバス任せ（auto）にすると、Phaser FIT が枠線込みの親サイズに
           合わせてキャンバスを広げる→親も広がる…の無限ループで、ページ全体が
-          0.5秒ごとに数pxずつ下がり続けるバグになる（実測で確認済み） */}
+          0.5秒ごとに数pxずつ下がり続けるバグになる（実測で確認済み）。
+          スマホでは左右の余白をなくして少しでも大きく表示する（full-bleed） */}
       <div
         ref={containerRef}
-        className="aspect-[16/11] max-h-[560px] w-full overflow-hidden rounded-xl border border-neutral-800 bg-black"
+        className="-mx-4 aspect-[16/11] max-h-[560px] overflow-hidden border-y border-neutral-800 bg-black sm:mx-0 sm:w-full sm:rounded-xl sm:border"
       />
+
+      {/* スマホ用の実況ウィンドウ：キャンバス内のメッセージは縮小されて
+          読めないため、同じ実況をHTML（ドラクエ風の窓）でも流す */}
+      {msgs.length > 0 && (
+        <div
+          className="rounded-lg border-2 border-white bg-black px-3 py-2 text-[13px] leading-relaxed text-white sm:hidden"
+          style={{ fontFamily: '"DotGothic16", monospace' }}
+          aria-live="polite"
+        >
+          {msgs.map((m, i) => (
+            <p key={i} className={i === msgs.length - 1 ? "" : "opacity-55"}>
+              {m}
+            </p>
+          ))}
+        </div>
+      )}
 
       {artifact && (
         <section className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4 text-sm dark:bg-amber-950/30">
@@ -221,7 +237,7 @@ export default function RpgPage() {
                 srcDoc={artifact.html}
                 sandbox="allow-scripts"
                 title="できあがった画面のプレビュー"
-                className="h-[420px] w-full rounded-lg border border-neutral-300 bg-white"
+                className="h-[320px] w-full rounded-lg border border-neutral-300 bg-white sm:h-[420px]"
               />
               {artifact.kind === "app" && (
                 <p className="text-[11px] text-neutral-500">
@@ -231,20 +247,20 @@ export default function RpgPage() {
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={() => openHtml(artifact.html)}
-                  className="rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-600"
+                  className="rounded-lg bg-amber-500 px-3 py-2 text-sm font-semibold text-white hover:bg-amber-600 sm:py-1.5 sm:text-xs"
                 >
                   🔍 べつタブで ひらく
                 </button>
                 <button
                   onClick={() => downloadFile("index.html", artifact.html)}
-                  className="rounded-lg border border-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100"
+                  className="rounded-lg border border-amber-500 px-3 py-2 text-sm font-semibold text-amber-700 hover:bg-amber-100 sm:py-1.5 sm:text-xs"
                 >
                   💾 index.html を ダウンロード
                 </button>
                 {artifact.kind === "app" && artifact.code && (
                   <button
                     onClick={() => downloadFile("main.py", artifact.code)}
-                    className="rounded-lg border border-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100"
+                    className="rounded-lg border border-amber-500 px-3 py-2 text-sm font-semibold text-amber-700 hover:bg-amber-100 sm:py-1.5 sm:text-xs"
                   >
                     💾 main.py（API）を ダウンロード
                   </button>

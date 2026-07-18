@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { HistorySidebar } from "../components/HistorySidebar";
-import { SakusenSelect } from "../components/SakusenSelect";
+import { QuestForm } from "../components/QuestForm";
 import * as quest from "../lib/quest";
 
 // Orchestrator(SSE) のエンドポイント。デプロイ時は NEXT_PUBLIC_HIVE_API で差し替え。
@@ -289,42 +289,37 @@ export default function TimelinePage() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-5xl gap-5 px-4 py-8">
+    <main className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-4 md:flex-row md:gap-5 md:py-8">
       <HistorySidebar />
-      <div className="flex min-h-screen min-w-0 flex-1 flex-col gap-6">
-      <header className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="text-3xl">🐝</span>
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">HIVE QUEST</h1>
-            <p className="text-sm text-neutral-500">
+      <div className="flex min-w-0 flex-1 flex-col gap-4 md:min-h-screen md:gap-6">
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="text-2xl sm:text-3xl">🐝</span>
+          <div className="min-w-0">
+            <h1 className="text-xl font-bold tracking-tight sm:text-2xl">HIVE QUEST</h1>
+            <p className="text-xs text-neutral-500 sm:text-sm">
               はたらきバチたちのやり取りをチャット形式でくわしく見る
             </p>
           </div>
         </div>
-        <Link href="/" className="shrink-0 text-sm text-amber-600 hover:underline">
+        <Link
+          href="/"
+          className="shrink-0 rounded-full border border-amber-300 px-3 py-1.5 text-sm text-amber-700 transition hover:bg-amber-50 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-950/40"
+        >
           🎮 RPG画面にもどる
         </Link>
       </header>
 
-      <div className="flex gap-2">
-        <input
-          className="flex-1 rounded-lg border border-neutral-300 px-3 py-2 text-sm outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-200 dark:border-neutral-700 dark:bg-neutral-900"
-          value={task}
-          onChange={(e) => setTask(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && start()}
-          placeholder="クエストを発注しよう！（例: タスク管理のCRUD APIをFastAPIで作って）"
-          disabled={running}
-        />
-        <SakusenSelect value={effort} onChange={setEffort} disabled={running} />
-        <button
-          onClick={start}
-          disabled={running || !task.trim()}
-          className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-600 disabled:opacity-50"
-        >
-          {running ? "進行中…" : "発注する"}
-        </button>
-      </div>
+      <QuestForm
+        task={task}
+        onTaskChange={setTask}
+        effort={effort}
+        onEffortChange={setEffort}
+        running={running}
+        onStart={start}
+        submitLabel="発注する"
+        runningLabel="進行中…"
+      />
 
       <ol className="flex flex-col gap-3">
         {items.map((it) => (
